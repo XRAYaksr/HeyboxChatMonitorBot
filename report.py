@@ -146,15 +146,35 @@ def main():
         where.append("channel_id = ?")
         params.append(str(args.channel))
 
-    sql = """
-        SELECT
-            user_id,
-            channel_id,
-            join_time,
-            leave_time,
-            duration_seconds
-        FROM voice_sessions
-    """
+    # 主程序会把下线超过 3 天的记录归档到 voice_sessions_archive，这里合并查询保证历史完整
+    has_archive = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='voice_sessions_archive'"
+    ).fetchone() is not None
+
+    if has_archive:
+        sql = """
+            SELECT
+                user_id,
+                channel_id,
+                join_time,
+                leave_time,
+                duration_seconds
+            FROM (
+                SELECT user_id, channel_id, join_time, leave_time, duration_seconds FROM voice_sessions
+                UNION ALL
+                SELECT user_id, channel_id, join_time, leave_time, duration_seconds FROM voice_sessions_archive
+            )
+        """
+    else:
+        sql = """
+            SELECT
+                user_id,
+                channel_id,
+                join_time,
+                leave_time,
+                duration_seconds
+            FROM voice_sessions
+        """
 
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -173,7 +193,7 @@ def main():
 
     print()
     print("=" * 125)
-    print("黑盒语音上下线记录")
+    print("黑盒语音上下线记录" + ("（含 3 天前的归档记录）" if has_archive else ""))
     print("=" * 125)
     print(
         f"{'用户':<20}"

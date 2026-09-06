@@ -42,6 +42,10 @@ ROOM_USER_PAGE_LIMIT = 300
 NICKNAME_FAIL_RETRY_SECONDS = 300
 NICKNAME_EXPIRE_SECONDS = 3600
 
+# 「最近在线」只覆盖最近 3 天，更早的会话记录由归档任务移入 voice_sessions_archive。
+ARCHIVE_AFTER_DAYS = 3
+ARCHIVE_INTERVAL_SECONDS = 1800
+
 
 def load_config():
     if not CONFIG_FILE.exists():
@@ -56,6 +60,25 @@ def load_config():
 
 def fmt(dt):
     return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def fmt_minute(dt):
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def ago_text(seconds):
+    """距今多久，如“2天3小时前”“5分钟前”。"""
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}天{hours}小时前"
+    if hours:
+        return f"{hours}小时{minutes}分前"
+    if minutes:
+        return f"{minutes}分钟前"
+    return "刚刚"
 
 
 class NicknameCache:
@@ -269,10 +292,48 @@ def init_db():
                 FROM voice_sessions_old
             """)
             conn.execute("DROP TABLE voice_sessions_old")
+    # 归档表：存放下线超过 ARCHIVE_AFTER_DAYS 天的历史会话，结构与主表一致并额外记录归档时间。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS voice_sessions_archive (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            join_time TEXT,
+            leave_time TEXT,
+            duration_seconds INTEGER,
+            archived_at TEXT
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_voice_user ON voice_sessions(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_voice_channel ON voice_sessions(channel_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_user ON voice_sessions_archive(user_id)")
     conn.commit()
     return conn
+
+
+def archive_old_sessions(conn, now):
+    """把下线时间超过 ARCHIVE_AFTER_DAYS 天的已结束会话移入归档表，返回归档条数。
+
+    在线中的会话（leave_time 为空）不归档，等下线后由下一轮归档任务处理。
+    """
+    cutoff = fmt(now - timedelta(days=ARCHIVE_AFTER_DAYS))
+    rows = conn.execute(
+        "SELECT id, user_id, channel_id, join_time, leave_time, duration_seconds "
+        "FROM voice_sessions WHERE leave_time IS NOT NULL AND leave_time < ?",
+        (cutoff,),
+    ).fetchall()
+    if not rows:
+        return 0
+    archived_at = fmt(now)
+    conn.executemany(
+        "INSERT OR REPLACE INTO voice_sessions_archive "
+        "(id, user_id, channel_id, join_time, leave_time, duration_seconds, archived_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [row + (archived_at,) for row in rows],
+    )
+    conn.executemany("DELETE FROM voice_sessions WHERE id = ?", [(row[0],) for row in rows])
+    conn.commit()
+    return len(rows)
 
 
 def get_user_ids(config, channel_id):
@@ -311,6 +372,7 @@ class Monitor:
         self.online = {}
         self.last_update = None
         self.last_errors = {}
+        self.last_archive_run = None
         self.nicknames = nicknames
         self.web_port = WEB_PORT
 
@@ -399,6 +461,19 @@ class Monitor:
                         print(f"[{fmt(current_time)}] - 用户 {self.display_user(user_id)}（{user_id}）离开频道 {channel_id}，在线 {duration_text(seconds)}")
                 self.last_update = current_time
 
+    def maybe_archive(self, now):
+        """按间隔把下线超过 3 天的记录移入归档表。"""
+        if self.last_archive_run is not None and \
+                now - self.last_archive_run < timedelta(seconds=ARCHIVE_INTERVAL_SECONDS):
+            return
+        self.last_archive_run = now
+        try:
+            count = archive_old_sessions(self.conn, now)
+            if count:
+                print(f"[{fmt(now)}] 已归档 {count} 条下线超过 {ARCHIVE_AFTER_DAYS} 天的记录")
+        except Exception as exc:
+            print(f"[{fmt(now)}] 归档失败：{exc}")
+
     def run(self):
         self.initialize()
         print(f"开始监控 {len(self.channel_ids)} 个频道，轮询间隔 {self.interval} 秒。")
@@ -406,6 +481,7 @@ class Monitor:
         print("按 Ctrl+C 停止。\n")
         while True:
             self.check_once()
+            self.maybe_archive(datetime.now())
             time.sleep(self.interval)
 
 
@@ -483,9 +559,45 @@ def dashboard(monitor, channel_filter="", user_filter=""):
                 "duration": duration_text(r[5]),
             })
 
+        online_user_ids = set()
+        for users in monitor.online.values():
+            online_user_ids.update(users)
+
+        # 最近在线：每人在最近 3 天内最后一次下线的时间。SQLite 规定聚合查询带单个
+        # MAX()/MIN() 时其余裸列取自极值所在行，channel_id 即该次下线对应的频道。
+        recent_clauses = ["leave_time IS NOT NULL", "leave_time >= ?"]
+        recent_params = [fmt(now - timedelta(days=ARCHIVE_AFTER_DAYS))]
+        if channel_filter:
+            recent_clauses.append("channel_id = ?")
+            recent_params.append(channel_filter)
+        recent_rows = monitor.conn.execute(
+            "SELECT user_id, channel_id, MAX(leave_time) FROM voice_sessions WHERE "
+            + " AND ".join(recent_clauses) + " GROUP BY user_id",
+            recent_params,
+        ).fetchall()
+        recent_rows.sort(key=lambda r: r[2] or "", reverse=True)
+
+        recent_online = []
+        for user_id, channel_id, last_leave in recent_rows:
+            if user_id in online_user_ids:
+                continue
+            user_info = monitor.nicknames.lookup(user_id) if monitor.nicknames else {"name": "", "avatar": ""}
+            if user_filter and user_filter not in user_id and user_filter not in (user_info["name"] or ""):
+                continue
+            leave_dt = datetime.strptime(last_leave, "%Y-%m-%d %H:%M:%S")
+            recent_online.append({
+                "user_id": user_id,
+                "username": user_info["name"],
+                "avatar": user_info["avatar"],
+                "channel_id": channel_id,
+                "leave_time": fmt_minute(leave_dt),
+                "ago": ago_text((now - leave_dt).total_seconds()),
+            })
+
         return {
             "online": online_rows,
             "history": history,
+            "recent_online": recent_online,
             "last_update": fmt(monitor.last_update) if monitor.last_update else "-",
             "errors": dict(monitor.last_errors),
             "channels": monitor.channel_ids,
@@ -521,6 +633,8 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;p
 <div class="panel"><h2>当前在线</h2>
 <div class="toolbar"><input id="userFilter" placeholder="按用户名或用户ID筛选"><input id="channelFilter" placeholder="按频道ID筛选"><button onclick="loadData()">刷新</button></div>
 <table><thead><tr><th>状态</th><th>用户</th><th>频道ID</th><th>进入时间</th><th>本次在线</th></tr></thead><tbody id="onlineBody"></tbody></table></div>
+<div class="panel"><h2>最近在线 <span class="muted" style="font-size:12px;font-weight:normal">最近 3 天内最后一次下线的用户，更早的记录自动归档</span></h2>
+<table><thead><tr><th>用户</th><th>频道ID</th><th>下线时间</th><th>距今</th></tr></thead><tbody id="recentBody"></tbody></table></div>
 <div class="panel"><h2>最近记录</h2>
 <table><thead><tr><th>用户</th><th>频道ID</th><th>上线时间</th><th>下线时间</th><th>在线时长</th></tr></thead><tbody id="historyBody"></tbody></table></div>
 </div>
@@ -545,6 +659,7 @@ async function loadData(){
  const errors=Object.entries(d.errors);
  document.getElementById("errors").innerHTML=errors.length?errors.map(([c,e])=>`<div class="err">频道 ${esc(c)}：${esc(e)}</div>`).join(""):"";
  document.getElementById("onlineBody").innerHTML=d.online.length?d.online.map(x=>`<tr><td class="online"><span class="dot"></span>在线</td><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.join_time||"程序启动时已在线")}</td><td>${duration(x.current_seconds)}</td></tr>`).join(""):`<tr><td colspan="5" class="muted">当前没有在线用户</td></tr>`;
+ document.getElementById("recentBody").innerHTML=d.recent_online.length?d.recent_online.map(x=>`<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.leave_time)}</td><td>${esc(x.ago)}</td></tr>`).join(""):`<tr><td colspan="4" class="muted">最近 3 天内没有下线记录</td></tr>`;
  document.getElementById("historyBody").innerHTML=d.history.length?d.history.map(x=>`<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.join_time||"程序启动时已在线")}</td><td>${esc(x.leave_time||"在线中")}</td><td>${esc(x.duration)}</td></tr>`).join(""):`<tr><td colspan="5" class="muted">暂无记录</td></tr>`;
 }
 loadData();setInterval(loadData,5000);
