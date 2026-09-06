@@ -27,6 +27,8 @@ SESSION_COOKIE_NAME = "heybox_session"
 SESSION_TTL_SECONDS = 7 * 24 * 3600
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_SECONDS = 300
+EDIT_MAX_ATTEMPTS = 5
+EDIT_WINDOW_SECONDS = 300
 
 COMMON_PARAMS = {
     "client_type": "heybox_chat",
@@ -242,6 +244,38 @@ class AuthManager:
             self.sessions.pop(token, None)
 
 
+class EditGuard:
+    """历史记录编辑的独立密码验证（config.json 中的 edit_password），带失败锁定。
+
+    与面板登录密码相互独立；未设置 edit_password 时编辑功能整体禁用。
+    """
+
+    def __init__(self, config):
+        self.lock = threading.RLock()
+        self.failures = []
+        password = str(config.get("edit_password", "")).strip()
+        self.enabled = bool(password)
+        self.password_hash = hashlib.sha256(password.encode("utf-8")).hexdigest() if password else None
+
+    def verify(self, password):
+        """校验编辑密码，返回 (是否通过, 错误信息)。"""
+        if not self.enabled:
+            return False, "未在 config.json 中设置 edit_password，编辑功能已禁用"
+        now = datetime.now()
+        with self.lock:
+            cutoff = now - timedelta(seconds=EDIT_WINDOW_SECONDS)
+            self.failures = [t for t in self.failures if t > cutoff]
+            if len(self.failures) >= EDIT_MAX_ATTEMPTS:
+                return False, f"尝试次数过多，请 {EDIT_WINDOW_SECONDS // 60} 分钟后再试"
+            if password and hmac.compare_digest(
+                    hashlib.sha256(password.encode("utf-8")).hexdigest(), self.password_hash):
+                self.failures = []
+                return True, ""
+            self.failures.append(now)
+            remaining = EDIT_MAX_ATTEMPTS - len(self.failures)
+            return False, f"编辑密码错误（剩余 {max(remaining, 0)} 次尝试机会）"
+
+
 def duration_text(seconds):
     if seconds is None:
         return "-"
@@ -253,6 +287,19 @@ def duration_text(seconds):
     if m:
         return f"{m}分{s}秒"
     return f"{s}秒"
+
+
+def parse_time_input(value):
+    """把用户输入解析为数据库时间格式，空值返回 None，非法格式抛 ValueError。"""
+    value = (value or "").strip()
+    if not value:
+        return None
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(value, pattern).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    raise ValueError("时间格式应为 2026-09-06 14:30 或 2026-09-06 14:30:00，留空表示未知")
 
 
 def init_db():
@@ -307,6 +354,13 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_voice_user ON voice_sessions(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_voice_channel ON voice_sessions(channel_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_user ON voice_sessions_archive(user_id)")
+    # 键值状态表：记录每个频道最后一次成功轮询的时间，供重启后补记停机期间的下线
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS monitor_state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
     conn.commit()
     return conn
 
@@ -413,6 +467,48 @@ class Monitor:
         self.conn.commit()
         return seconds
 
+    def edit_session(self, session_id, join_time, leave_time):
+        """编辑一条记录的上下线时间并重算在线时长，返回受影响行数。
+
+        仍进行中的记录（leave_time 为空）不允许编辑，避免与监控状态冲突；
+        两个时间都填时自动重算 duration_seconds，留空一侧则时长记为空。
+        """
+        if not join_time and not leave_time:
+            raise ValueError("上线时间和下线时间不能都为空")
+        row = self.conn.execute(
+            "SELECT leave_time FROM voice_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not row:
+            raise LookupError("记录不存在或已归档")
+        if row[0] is None:
+            raise ValueError("该记录对应的会话仍在进行中，暂不支持编辑")
+        if join_time and leave_time and join_time >= leave_time:
+            raise ValueError("上线时间必须早于下线时间")
+        duration = None
+        if join_time and leave_time:
+            seconds = (datetime.strptime(leave_time, "%Y-%m-%d %H:%M:%S")
+                       - datetime.strptime(join_time, "%Y-%m-%d %H:%M:%S")).total_seconds()
+            duration = max(0, int(seconds))
+        cur = self.conn.execute(
+            "UPDATE voice_sessions SET join_time = ?, leave_time = ?, duration_seconds = ? WHERE id = ?",
+            (join_time, leave_time, duration, session_id),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def delete_session(self, session_id):
+        """删除一条历史记录，返回受影响行数。进行中的会话不允许删除。"""
+        row = self.conn.execute(
+            "SELECT leave_time FROM voice_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not row:
+            raise LookupError("记录不存在或已归档")
+        if row[0] is None:
+            raise ValueError("该记录对应的会话仍在进行中，暂不支持删除")
+        cur = self.conn.execute("DELETE FROM voice_sessions WHERE id = ?", (session_id,))
+        self.conn.commit()
+        return cur.rowcount
+
     def initialize(self):
         print("正在获取初始在线状态...")
         if not self.channel_ids:
@@ -427,8 +523,45 @@ class Monitor:
                 continue
             self.online[channel_id] = {user_id: None for user_id in users}
             print(f"频道 {channel_id}: 当前 {len(users)} 人在线")
+        self.recover_sessions()
         self.last_update = datetime.now()
         print("初始化完成。\n")
+
+    def recover_sessions(self):
+        """重启后接续数据库里未关闭的会话。
+
+        仍在线的用户沿用原会话，进入时间和在线时长跨重启累计；停机期间离开的
+        用户按该频道最后一次成功轮询时间补记下线（无记录时按当前时间兜底）。
+        """
+        with self.lock:
+            state = dict(self.conn.execute("SELECT key, value FROM monitor_state").fetchall())
+            now = datetime.now()
+            open_rows = self.conn.execute(
+                "SELECT id, user_id, channel_id FROM voice_sessions WHERE leave_time IS NULL ORDER BY id"
+            ).fetchall()
+            latest, stale_ids = {}, []
+            for session_id, user_id, channel_id in open_rows:
+                key = (channel_id, user_id)
+                if key in latest:
+                    stale_ids.append(latest[key])
+                latest[key] = session_id
+            adopted, closed = 0, 0
+            for (channel_id, user_id), session_id in latest.items():
+                if user_id in self.online.get(channel_id, {}):
+                    self.online[channel_id][user_id] = session_id
+                    adopted += 1
+                    continue
+                last_poll = state.get("last_poll:" + channel_id)
+                close_time = datetime.strptime(last_poll, "%Y-%m-%d %H:%M:%S") if last_poll else now
+                self.close_session(session_id, close_time)
+                closed += 1
+            for session_id in stale_ids:
+                self.close_session(session_id, now)
+            if adopted or closed:
+                msg = f"已恢复 {adopted} 个进行中的会话"
+                if closed:
+                    msg += f"，补记 {closed} 个停机期间的下线"
+                print(msg + "。")
 
     def check_once(self):
         current_time = datetime.now()
@@ -460,6 +593,12 @@ class Monitor:
                         seconds = self.close_session(session_id, current_time)
                         print(f"[{fmt(current_time)}] - 用户 {self.display_user(user_id)}（{user_id}）离开频道 {channel_id}，在线 {duration_text(seconds)}")
                 self.last_update = current_time
+                # 记录本轮成功轮询时间，供重启后补记停机期间的下线
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO monitor_state (key, value) VALUES (?, ?)",
+                    ("last_poll:" + channel_id, fmt(current_time)),
+                )
+                self.conn.commit()
 
     def maybe_archive(self, now):
         """按间隔把下线超过 3 天的记录移入归档表。"""
@@ -550,6 +689,7 @@ def dashboard(monitor, channel_filter="", user_filter=""):
             if user_filter and user_filter not in user_id and user_filter not in (user_info["name"] or ""):
                 continue
             history.append({
+                "id": r[0],
                 "user_id": user_id,
                 "username": user_info["name"],
                 "avatar": user_info["avatar"],
@@ -615,6 +755,7 @@ HTML = r"""<!doctype html>
 .card{padding:16px}.label{font-size:13px;color:#6b7280}.value{font-size:28px;font-weight:700;margin-top:5px}.panel{padding:16px;margin-bottom:16px}
 .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}input{padding:9px 11px;border:1px solid #d1d5db;border-radius:8px;min-width:190px}
 button{padding:9px 14px;border:0;border-radius:8px;cursor:pointer;background:#111827;color:white}
+button.mini{padding:4px 10px;font-size:12px}.mini.gray{background:#6b7280}.mini.red{background:#dc2626}input.small{padding:5px 7px;min-width:0;width:158px;font-size:13px}
 table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eef0f3}th{color:#6b7280;font-weight:600}
 .online{font-weight:600}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#16a34a;margin-right:6px}.muted{color:#6b7280}
 .avatar{width:28px;height:28px;border-radius:50%;vertical-align:middle;margin-right:8px;object-fit:cover;background:#e5e7eb}
@@ -636,7 +777,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;p
 <div class="panel"><h2>最近在线 <span class="muted" style="font-size:12px;font-weight:normal">最近 3 天内最后一次下线的用户，更早的记录自动归档</span></h2>
 <table><thead><tr><th>用户</th><th>频道ID</th><th>下线时间</th><th>距今</th></tr></thead><tbody id="recentBody"></tbody></table></div>
 <div class="panel"><h2>最近记录</h2>
-<table><thead><tr><th>用户</th><th>频道ID</th><th>上线时间</th><th>下线时间</th><th>在线时长</th></tr></thead><tbody id="historyBody"></tbody></table></div>
+<table><thead><tr><th>用户</th><th>频道ID</th><th>上线时间</th><th>下线时间</th><th>在线时长</th><th>操作</th></tr></thead><tbody id="historyBody"></tbody></table></div>
 </div>
 <script>
 function esc(s){return String(s??"-").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
@@ -660,9 +801,44 @@ async function loadData(){
  document.getElementById("errors").innerHTML=errors.length?errors.map(([c,e])=>`<div class="err">频道 ${esc(c)}：${esc(e)}</div>`).join(""):"";
  document.getElementById("onlineBody").innerHTML=d.online.length?d.online.map(x=>`<tr><td class="online"><span class="dot"></span>在线</td><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.join_time||"程序启动时已在线")}</td><td>${duration(x.current_seconds)}</td></tr>`).join(""):`<tr><td colspan="5" class="muted">当前没有在线用户</td></tr>`;
  document.getElementById("recentBody").innerHTML=d.recent_online.length?d.recent_online.map(x=>`<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.leave_time)}</td><td>${esc(x.ago)}</td></tr>`).join(""):`<tr><td colspan="4" class="muted">最近 3 天内没有下线记录</td></tr>`;
- document.getElementById("historyBody").innerHTML=d.history.length?d.history.map(x=>`<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.join_time||"程序启动时已在线")}</td><td>${esc(x.leave_time||"在线中")}</td><td>${esc(x.duration)}</td></tr>`).join(""):`<tr><td colspan="5" class="muted">暂无记录</td></tr>`;
+ document.getElementById("historyBody").innerHTML=d.history.length?d.history.map(x=>x.id===editingId?editRow(x):x.id===deletingId?deleteRow(x):`<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.join_time||"程序启动时已在线")}</td><td>${esc(x.leave_time||"在线中")}</td><td>${esc(x.duration)}</td><td><button class="mini" onclick="startEdit(${x.id})">编辑</button> <button class="mini red" onclick="startDelete(${x.id})">删除</button></td></tr>`).join(""):`<tr><td colspan="6" class="muted">暂无记录</td></tr>`;
 }
-loadData();setInterval(loadData,5000);
+let editingId=null,deletingId=null;
+function editRow(x){
+ return `<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td>`+
+  `<td><input class="small" id="editJoin" value="${esc(x.join_time||"")}" placeholder="留空=未知"></td>`+
+  `<td><input class="small" id="editLeave" value="${esc(x.leave_time||"")}" placeholder="留空=在线中"></td>`+
+  `<td class="muted">保存时重算</td>`+
+  `<td><input class="small" id="editPwd" type="password" placeholder="编辑密码" style="width:96px" onkeydown="if(event.key==='Enter')saveEdit(${x.id})"> `+
+  `<button class="mini" onclick="saveEdit(${x.id})">保存</button> <button class="mini gray" onclick="cancelEdit()">取消</button></td></tr>`;
+}
+function deleteRow(x){
+ return `<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td>`+
+  `<td colspan="3" class="muted">确认删除这条记录？删除后不可恢复。</td>`+
+  `<td><input class="small" id="delPwd" type="password" placeholder="编辑密码" style="width:96px" onkeydown="if(event.key==='Enter')confirmDelete(${x.id})"> `+
+  `<button class="mini red" onclick="confirmDelete(${x.id})">确认删除</button> <button class="mini gray" onclick="cancelDelete()">取消</button></td></tr>`;
+}
+function startEdit(id){editingId=id;deletingId=null;loadData()}
+function cancelEdit(){editingId=null;loadData()}
+function startDelete(id){deletingId=id;editingId=null;loadData()}
+function cancelDelete(){deletingId=null;loadData()}
+async function saveEdit(id){
+ const body={id:id,join_time:document.getElementById("editJoin").value,leave_time:document.getElementById("editLeave").value,password:document.getElementById("editPwd").value};
+ const resp=await fetch("/api/edit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+ if(resp.status===401){location.href="/login";return}
+ const r=await resp.json().catch(()=>({}));
+ if(r.error){alert(r.error);return}
+ editingId=null;loadData();
+}
+async function confirmDelete(id){
+ const body={id:id,password:document.getElementById("delPwd").value};
+ const resp=await fetch("/api/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+ if(resp.status===401){location.href="/login";return}
+ const r=await resp.json().catch(()=>({}));
+ if(r.error){alert(r.error);return}
+ deletingId=null;loadData();
+}
+loadData();setInterval(()=>{if(editingId===null&&deletingId===null)loadData()},5000);
 for(const id of ["userFilter","channelFilter"])document.getElementById(id).addEventListener("keydown",e=>{if(e.key==="Enter")loadData()});
 </script></body></html>"""
 
@@ -705,6 +881,7 @@ __ERROR__
 class WebHandler(BaseHTTPRequestHandler):
     monitor = None
     auth = None
+    edit_guard = None
 
     def log_message(self, fmt, *args):
         return
@@ -774,6 +951,12 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/edit":
+            self.handle_edit()
+            return
+        if parsed.path == "/api/delete":
+            self.handle_delete()
+            return
         if parsed.path != "/login" or self.auth is None:
             self.send_text("404 Not Found", "text/plain; charset=utf-8", 404)
             return
@@ -792,6 +975,57 @@ class WebHandler(BaseHTTPRequestHandler):
             error_html = f'<div class="err">{escape_html(result)}</div>'
             self.send_text(LOGIN_HTML.replace("__ERROR__", error_html))
 
+    def send_json(self, obj, status=200):
+        self.send_text(json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8", status)
+
+    def guarded_payload(self):
+        """编辑/删除接口的公共前置校验：会话 + 独立二级密码。
+
+        校验失败时直接发送错误响应并返回 None，成功返回解析后的 JSON body。
+        """
+        if not self.authenticated():
+            self.send_json({"error": "未登录"}, 401)
+            return None
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(min(length, 8192)).decode("utf-8", errors="replace"))
+        except (ValueError, TypeError):
+            self.send_json({"error": "无效请求"}, 400)
+            return None
+        ok, message = self.edit_guard.verify(str(payload.get("password", "")))
+        if not ok:
+            self.send_json({"error": message}, 403)
+            return None
+        return payload
+
+    def handle_edit(self):
+        """编辑历史记录：校验通过后修改上下线时间并重算时长。"""
+        payload = self.guarded_payload()
+        if payload is None:
+            return
+        try:
+            session_id = int(payload.get("id"))
+            join_time = parse_time_input(payload.get("join_time"))
+            leave_time = parse_time_input(payload.get("leave_time"))
+            self.monitor.edit_session(session_id, join_time, leave_time)
+        except (ValueError, TypeError, LookupError) as exc:
+            self.send_json({"error": str(exc) or "参数无效"}, 400)
+            return
+        self.send_json({"ok": True})
+
+    def handle_delete(self):
+        """删除历史记录：与编辑共用同一独立密码及失败锁定。"""
+        payload = self.guarded_payload()
+        if payload is None:
+            return
+        try:
+            session_id = int(payload.get("id"))
+            self.monitor.delete_session(session_id)
+        except (ValueError, TypeError, LookupError) as exc:
+            self.send_json({"error": str(exc) or "参数无效"}, 400)
+            return
+        self.send_json({"ok": True})
+
     def redirect(self, location, set_cookie="", clear_cookie=False):
         self.send_response(303)
         self.send_header("Location", location)
@@ -803,9 +1037,10 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def start_web(monitor, port, auth):
+def start_web(monitor, port, auth, edit_guard):
     WebHandler.monitor = monitor
     WebHandler.auth = auth
+    WebHandler.edit_guard = edit_guard
     try:
         server = ThreadingHTTPServer((WEB_HOST, port), WebHandler)
     except OSError as exc:
@@ -823,9 +1058,10 @@ def main():
     nicknames.refresh_all()
     monitor = Monitor(config, conn, nicknames)
     auth = AuthManager(config)
+    edit_guard = EditGuard(config)
     web_port = int(config.get("web_port", WEB_PORT))
     monitor.web_port = web_port
-    threading.Thread(target=start_web, args=(monitor, web_port, auth), daemon=True).start()
+    threading.Thread(target=start_web, args=(monitor, web_port, auth, edit_guard), daemon=True).start()
     try:
         monitor.run()
     except KeyboardInterrupt:
