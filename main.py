@@ -452,7 +452,7 @@ class Monitor:
         )
         self.conn.commit()
 
-    def close_session(self, session_id, when):
+    def close_session(self, session_id, when, record_duration=True):
         row = self.conn.execute(
             "SELECT join_time FROM voice_sessions WHERE id = ?", (session_id,)
         ).fetchone()
@@ -460,12 +460,19 @@ class Monitor:
             return None
         joined = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
         seconds = max(0, int((when - joined).total_seconds()))
-        self.conn.execute(
-            "UPDATE voice_sessions SET leave_time = ?, duration_seconds = ? WHERE id = ?",
-            (fmt(when), seconds, session_id),
-        )
+        if record_duration:
+            self.conn.execute(
+                "UPDATE voice_sessions SET leave_time = ?, duration_seconds = ? WHERE id = ?",
+                (fmt(when), seconds, session_id),
+            )
+        else:
+            # 无法确认真实下线时间时只记“最后确认在线”的时间，不虚构在线时长
+            self.conn.execute(
+                "UPDATE voice_sessions SET leave_time = ? WHERE id = ?",
+                (fmt(when), session_id),
+            )
         self.conn.commit()
-        return seconds
+        return seconds if record_duration else None
 
     def edit_session(self, session_id, join_time, leave_time):
         """编辑一条记录的上下线时间并重算在线时长，返回受影响行数。
@@ -527,41 +534,71 @@ class Monitor:
         self.last_update = datetime.now()
         print("初始化完成。\n")
 
-    def recover_sessions(self):
-        """重启后接续数据库里未关闭的会话。
+    def settle_leftover_session(self, session_id, user_id, channel_id, join_time, online_now, state, now):
+        """处理一条重启后遗留的未关闭会话。
 
-        仍在线的用户沿用原会话，进入时间和在线时长跨重启累计；停机期间离开的
-        用户按该频道最后一次成功轮询时间补记下线（无记录时按当前时间兜底）。
+        优先用「程序启动时已在线」补记记录反推真实下线时间（旧版本重启遗留的
+        僵尸会话），命中则按真实时间关闭并把补记记录合并掉；否则该用户仍在线时
+        沿用原会话（时长跨重启累计），不在线时按最后一次成功轮询时间关闭且不记
+        时长——绝不虚构下线时间，避免出现超长在线时长。返回处理方式。
         """
+        matched = self.conn.execute(
+            "SELECT MIN(leave_time) FROM voice_sessions "
+            "WHERE user_id = ? AND channel_id = ? AND join_time IS NULL "
+            "AND leave_time IS NOT NULL AND leave_time > ?",
+            (user_id, channel_id, join_time),
+        ).fetchone()[0]
+        if matched:
+            self.close_session(session_id, datetime.strptime(matched, "%Y-%m-%d %H:%M:%S"))
+            self.conn.execute(
+                "DELETE FROM voice_sessions WHERE user_id = ? AND channel_id = ? "
+                "AND join_time IS NULL AND leave_time = ?",
+                (user_id, channel_id, matched),
+            )
+            self.conn.commit()
+            return "repaired"
+        if online_now:
+            self.online[channel_id][user_id] = session_id
+            return "adopted"
+        last_poll = state.get("last_poll:" + channel_id)
+        close_time = datetime.strptime(last_poll, "%Y-%m-%d %H:%M:%S") if last_poll else now
+        self.close_session(session_id, close_time, record_duration=False)
+        return "closed_unknown"
+
+    def recover_sessions(self):
+        """重启后接续数据库里未关闭的会话，时长跨重启累计，不虚构数据。"""
         with self.lock:
             state = dict(self.conn.execute("SELECT key, value FROM monitor_state").fetchall())
             now = datetime.now()
             open_rows = self.conn.execute(
-                "SELECT id, user_id, channel_id FROM voice_sessions WHERE leave_time IS NULL ORDER BY id"
+                "SELECT id, user_id, channel_id, join_time FROM voice_sessions "
+                "WHERE leave_time IS NULL ORDER BY id"
             ).fetchall()
-            latest, stale_ids = {}, []
-            for session_id, user_id, channel_id in open_rows:
+            latest, dup_rows = {}, []
+            for sid, user_id, channel_id, join_time in open_rows:
                 key = (channel_id, user_id)
                 if key in latest:
-                    stale_ids.append(latest[key])
-                latest[key] = session_id
-            adopted, closed = 0, 0
-            for (channel_id, user_id), session_id in latest.items():
-                if user_id in self.online.get(channel_id, {}):
-                    self.online[channel_id][user_id] = session_id
-                    adopted += 1
-                    continue
-                last_poll = state.get("last_poll:" + channel_id)
-                close_time = datetime.strptime(last_poll, "%Y-%m-%d %H:%M:%S") if last_poll else now
-                self.close_session(session_id, close_time)
-                closed += 1
-            for session_id in stale_ids:
-                self.close_session(session_id, now)
-            if adopted or closed:
-                msg = f"已恢复 {adopted} 个进行中的会话"
-                if closed:
-                    msg += f"，补记 {closed} 个停机期间的下线"
-                print(msg + "。")
+                    dup_rows.append(latest[key])
+                latest[key] = (sid, user_id, channel_id, join_time)
+            counts = {"adopted": 0, "repaired": 0, "closed_unknown": 0}
+            # 先处理每个用户最新的会话，重复的旧会话排在后面
+            for (channel_id, user_id), (sid, _, _, join_time) in latest.items():
+                outcome = self.settle_leftover_session(
+                    sid, user_id, channel_id, join_time,
+                    user_id in self.online.get(channel_id, {}), state, now)
+                counts[outcome] += 1
+            for sid, uid, cid, join_time in dup_rows:
+                outcome = self.settle_leftover_session(sid, uid, cid, join_time, False, state, now)
+                counts[outcome] += 1
+            parts = []
+            if counts["adopted"]:
+                parts.append(f"恢复 {counts['adopted']} 个进行中的会话")
+            if counts["repaired"]:
+                parts.append(f"按真实下线时间修复 {counts['repaired']} 个遗留会话")
+            if counts["closed_unknown"]:
+                parts.append(f"关闭 {counts['closed_unknown']} 个无法确认下线时间的遗留会话")
+            if parts:
+                print("重启会话恢复：" + "，".join(parts) + "。")
 
     def check_once(self):
         current_time = datetime.now()
@@ -757,6 +794,7 @@ HTML = r"""<!doctype html>
 button{padding:9px 14px;border:0;border-radius:8px;cursor:pointer;background:#111827;color:white}
 button.mini{padding:4px 10px;font-size:12px}.mini.gray{background:#6b7280}.mini.red{background:#dc2626}input.small{padding:5px 7px;min-width:0;width:158px;font-size:13px}
 table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eef0f3}th{color:#6b7280;font-weight:600}
+tr.daysep>td{border-top:2px solid #64748b}
 .online{font-weight:600}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#16a34a;margin-right:6px}.muted{color:#6b7280}
 .avatar{width:28px;height:28px;border-radius:50%;vertical-align:middle;margin-right:8px;object-fit:cover;background:#e5e7eb}
 .uname{font-weight:600}.uid{color:#6b7280;font-size:12px}
@@ -800,10 +838,24 @@ async function loadData(){
  const errors=Object.entries(d.errors);
  document.getElementById("errors").innerHTML=errors.length?errors.map(([c,e])=>`<div class="err">频道 ${esc(c)}：${esc(e)}</div>`).join(""):"";
  document.getElementById("onlineBody").innerHTML=d.online.length?d.online.map(x=>`<tr><td class="online"><span class="dot"></span>在线</td><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.join_time||"程序启动时已在线")}</td><td>${duration(x.current_seconds)}</td></tr>`).join(""):`<tr><td colspan="5" class="muted">当前没有在线用户</td></tr>`;
- document.getElementById("recentBody").innerHTML=d.recent_online.length?d.recent_online.map(x=>`<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.leave_time)}</td><td>${esc(x.ago)}</td></tr>`).join(""):`<tr><td colspan="4" class="muted">最近 3 天内没有下线记录</td></tr>`;
- document.getElementById("historyBody").innerHTML=d.history.length?d.history.map(x=>x.id===editingId?editRow(x):x.id===deletingId?deleteRow(x):`<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.join_time||"程序启动时已在线")}</td><td>${esc(x.leave_time||"在线中")}</td><td>${esc(x.duration)}</td><td><button class="mini" onclick="startEdit(${x.id})">编辑</button> <button class="mini red" onclick="startDelete(${x.id})">删除</button></td></tr>`).join(""):`<tr><td colspan="6" class="muted">暂无记录</td></tr>`;
+ recentPrevDay="";
+ document.getElementById("recentBody").innerHTML=d.recent_online.length?d.recent_online.map(x=>{
+  const day=(x.leave_time||"").slice(0,10);
+  const sep=day&&recentPrevDay&&day!==recentPrevDay?' class="daysep"':"";
+  if(day)recentPrevDay=day;
+  return `<tr${sep}><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.leave_time)}</td><td>${esc(x.ago)}</td></tr>`;
+ }).join(""):`<tr><td colspan="4" class="muted">最近 3 天内没有下线记录</td></tr>`;
+ historyPrevDay="";
+ document.getElementById("historyBody").innerHTML=d.history.length?d.history.map(x=>{
+  const day=(x.leave_time||x.join_time||"").slice(0,10);
+  const sep=day&&historyPrevDay&&day!==historyPrevDay?' class="daysep"':"";
+  if(day)historyPrevDay=day;
+  if(x.id===editingId)return editRow(x);
+  if(x.id===deletingId)return deleteRow(x);
+  return `<tr${sep}><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td><td>${esc(x.join_time||"程序启动时已在线")}</td><td>${esc(x.leave_time||"在线中")}</td><td>${esc(x.duration)}</td><td><button class="mini" onclick="startEdit(${x.id})">编辑</button> <button class="mini red" onclick="startDelete(${x.id})">删除</button></td></tr>`;
+ }).join(""):`<tr><td colspan="6" class="muted">暂无记录</td></tr>`;
 }
-let editingId=null,deletingId=null;
+let editingId=null,deletingId=null,historyPrevDay="",recentPrevDay="";
 function editRow(x){
  return `<tr><td>${userCell(x)}</td><td>${esc(x.channel_id)}</td>`+
   `<td><input class="small" id="editJoin" value="${esc(x.join_time||"")}" placeholder="留空=未知"></td>`+
