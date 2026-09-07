@@ -1,0 +1,16 @@
+{
+    "token": "你的机器人Token",
+    "heybox_id": "你的机器人独立ID",
+    "room_id": "房间ID（setup.py自动填写）",
+    "channel_ids": [
+        "频道ID（setup.py自动填写）"
+    ],
+    "poll_interval": 5,
+    "record_initial_online": false,
+    "web_port": 8080,
+    "web_password": "在这里设置面板访问密码",
+    "edit_password": "在这里设置历史记录编辑密码（可选，不设置则编辑功能禁用）",
+    "enable_bot_commands": false,
+    "epic_notify_channel_id": "Epic限免通知发送到的频道ID（可选，留空则不通知；需先在机器人平台注册 fortune/pick 命令）",
+    "admin_user_ids": ["管理员用户ID列表", "用于 /forcepushepic 等需要管理员权限的命令"]
+}
