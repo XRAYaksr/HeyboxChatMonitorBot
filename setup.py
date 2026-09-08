@@ -166,7 +166,7 @@ def main():
         "bot_enabled": True,
         "admins": admins,
         "epic_push_channel_id": epic_channel_id,
-        "epic_push_times": ["12:00"]
+        "epic_push_times": ["06:00"]
     }
 
     CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=4), encoding="utf-8")

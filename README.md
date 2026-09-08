@@ -34,7 +34,8 @@
 
 - 定时从 uapis.cn API 获取 Epic 免费游戏列表，按配置的时间自动推送到指定文字频道
 - 推送内容包括当前可领游戏、即将免费的游戏、封面图与领取链接
-- 支持配置多个推送时间点（默认每天 12:00）
+- 支持配置多个推送时间点（默认每天 06:00）
+- 每个时间点每天只请求一次接口；请求失败（如被限流）当天不再自动重试，可用 `/forcepushepic` 手动补推
 
 ## 环境要求
 
@@ -106,7 +107,7 @@ python main.py
 | `bot_enabled` | 是否启用斜杠命令机器人，默认 `true` |
 | `admins` | 管理员用户 ID 列表（与房主、管理员角色合并） |
 | `epic_push_channel_id` | Epic 免费游戏推送的目标文字频道 ID（不填则不推送） |
-| `epic_push_times` | Epic 推送时间点列表，格式 `["HH:MM"]`，默认 `["12:00"]` |
+| `epic_push_times` | Epic 推送时间点列表，格式 `["HH:MM"]`，默认 `["06:00"]` |
 
 ## 网页面板
 
@@ -207,6 +208,9 @@ systemctl enable --now heychat-monitor
 
 **Epic 推送没有生效？**
 确认 `epic_push_channel_id` 已填写为有效的文字频道 ID，并检查 `epic_push_times` 的时间配置。
+
+**Epic 推送报 429 Too Many Requests？**
+接口侧限流。每个时间点每天只查询一次，失败后当天不会自动重试；可稍后用 `/forcepushepic` 手动推送，或把 `epic_push_times` 调整到请求更少的时段。
 
 ## 免责声明
 
