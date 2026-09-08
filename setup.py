@@ -137,13 +137,36 @@ def main():
         except ValueError:
             print("输入无效。")
 
+    epic_channel_id = ""
+    print("\n文字频道列表（用于 Epic 免费游戏推送，可回车跳过）：")
+    text_channels = [ch for ch in channels if ch.get("channel_type") == 1]
+    for i, ch in enumerate(text_channels, 1):
+        print(f"[{i}] {ch.get('channel_name', '(无名称)')} | channel_id={ch.get('channel_id')}")
+    raw = input("请选择推送频道编号: ").strip()
+    if raw:
+        try:
+            idx = int(raw)
+            if 1 <= idx <= len(text_channels):
+                epic_channel_id = str(text_channels[idx - 1]["channel_id"])
+            else:
+                print("编号超出范围，已跳过。")
+        except ValueError:
+            print("输入无效，已跳过。")
+
+    raw = input("\n请输入管理员用户ID（多个用逗号分隔，回车跳过）: ").strip()
+    admins = [x.strip() for x in raw.split(",") if x.strip().isdigit()]
+
     config = {
         "token": BOT_TOKEN,
         "heybox_id": str(BOT_ID),
         "room_id": room_id,
         "channel_ids": [str(x["channel_id"]) for x in selected],
         "poll_interval": 5,
-        "record_initial_online": False
+        "record_initial_online": False,
+        "bot_enabled": True,
+        "admins": admins,
+        "epic_push_channel_id": epic_channel_id,
+        "epic_push_times": ["12:00"]
     }
 
     CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=4), encoding="utf-8")
@@ -152,6 +175,10 @@ def main():
     print(f"room_id = {room_id}")
     for ch in selected:
         print(f"channel = {ch.get('channel_name')}, channel_id = {ch.get('channel_id')}")
+    if epic_channel_id:
+        print(f"epic_push_channel_id = {epic_channel_id}")
+    if admins:
+        print(f"admins = {admins}")
     print("\n运行：python main.py")
 
 if __name__ == "__main__":

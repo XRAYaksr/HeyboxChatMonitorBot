@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from chat_bot import ChatBot
+
 BASE_URL = "https://chat.xiaoheihe.cn"
 CONFIG_FILE = Path("config.json")
 DB_FILE = Path("voice_monitor.db")
@@ -1114,6 +1116,11 @@ def main():
     web_port = int(config.get("web_port", WEB_PORT))
     monitor.web_port = web_port
     threading.Thread(target=start_web, args=(monitor, web_port, auth, edit_guard), daemon=True).start()
+    # 斜杠命令机器人（/fortune /pick /forcepushepic /init /help），失败不影响监控本身
+    try:
+        ChatBot(config, nicknames=nicknames).start_background()
+    except Exception as exc:
+        print(f"机器人命令功能启动失败（监控不受影响）：{exc}")
     try:
         monitor.run()
     except KeyboardInterrupt:
