@@ -51,7 +51,8 @@ EVENT_MESSAGE_TYPE = "5"
 MSG_TYPE_MD = 4
 MSG_TYPE_MD_AT = 10
 ROOM_USER_PAGE_LIMIT = 300
-DEFAULT_EPIC_PUSH_TIMES = ["06:00"]
+DEFAULT_EPIC_PUSH_TIMES = ["00:00"]
+EPIC_ENDING_SOON_HOURS = 24
 
 
 class BotStore:
@@ -137,7 +138,7 @@ def parse_push_times(raw):
                 times.append((hour, minute))
         except ValueError:
             continue
-    return times or [(6, 0)]
+    return times or [(0, 0)]
 
 
 class CommandContext:
@@ -895,17 +896,27 @@ class ChatBot:
     def build_epic_message(self, games, now=None):
         now = now or datetime.now()
         now_ms = int(now.timestamp() * 1000)
-        free_now, upcoming = [], []
+        soon_limit = now_ms + EPIC_ENDING_SOON_HOURS * 3600 * 1000
+        ending_soon, free_now, upcoming = [], [], []
         for game in games:
             start_at = _to_ms(game.get("free_start_at"))
             end_at = _to_ms(game.get("free_end_at"))
             if game.get("is_free_now") or (start_at and start_at <= now_ms and (not end_at or end_at > now_ms)):
-                free_now.append(game)
+                if end_at and end_at <= soon_limit:
+                    ending_soon.append(game)
+                else:
+                    free_now.append(game)
             elif start_at and start_at > now_ms:
                 upcoming.append(game)
+        ending_soon.sort(key=lambda g: _to_ms(g.get("free_end_at")) or 0)
         upcoming.sort(key=lambda g: _to_ms(g.get("free_start_at")) or 0)
 
         lines = ["🎮 Epic 免费游戏速递", ""]
+        if ending_soon:
+            lines.append(f"🚨【即将结束·{EPIC_ENDING_SOON_HOURS}小时内】")
+            for game in ending_soon:
+                lines.extend(_epic_game_lines(game, "⏰ 领取截止", now))
+            lines.append("")
         lines.append("【现在可领】")
         if free_now:
             for game in free_now:
