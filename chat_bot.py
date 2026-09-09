@@ -911,25 +911,25 @@ class ChatBot:
         ending_soon.sort(key=lambda g: _to_ms(g.get("free_end_at")) or 0)
         upcoming.sort(key=lambda g: _to_ms(g.get("free_start_at")) or 0)
 
-        lines = ["🎮 Epic 免费游戏速递", ""]
+        # 每个视觉单元单独成块（块间空行）：黑盒 markdown 会把段落内的单换行折叠成一行
+        blocks = [["# 🎮 Epic 免费游戏速递"], ["🎁 免费领取期间请及时入库，避免错过恢复原价"]]
         if ending_soon:
-            lines.append(f"🚨【即将结束·{EPIC_ENDING_SOON_HOURS}小时内】")
+            blocks.append([f"## 🚨 即将结束（{EPIC_ENDING_SOON_HOURS} 小时内）"])
             for game in ending_soon:
-                lines.extend(_epic_game_lines(game, "⏰ 领取截止", now))
-            lines.append("")
-        lines.append("【现在可领】")
+                blocks.extend(_epic_game_block(game, now, "urgent"))
+        blocks.append(["## 🟢 现在可领"])
         if free_now:
             for game in free_now:
-                lines.extend(_epic_game_lines(game, "⏰ 领取截止", now))
+                blocks.extend(_epic_game_block(game, now, "free"))
         else:
-            lines.append("暂无")
+            blocks.append(["暂无"])
         if upcoming:
-            lines.append("")
-            lines.append("【即将免费】")
+            blocks.append(["## 🟡 即将免费"])
             for game in upcoming[:3]:
-                lines.extend(_epic_game_lines(game, "⏰ 开始时间", now))
+                blocks.extend(_epic_game_block(game, now, "upcoming"))
+        blocks.append(["💡 Epic 通常在每天 23:00 轮换，下期 00:00 速递见"])
         # 不内嵌封面图：markdown 图片只认黑盒 CDN，Epic 外链会让整条消息被判「图片链接地址不合法」发送失败
-        return "\n".join(lines)
+        return "\n\n".join("\n".join(block) for block in blocks)
 
     def push_epic_to_channel(self):
         """定时推送：发送到 epic_push_channel_id 并返回推送内容摘要。"""
@@ -1002,16 +1002,29 @@ def _remaining_text(end_ms, now):
     return f"还剩{hours}小时"
 
 
-def _epic_game_lines(game, time_label, now):
-    lines = [f"▫️ {game.get('title') or '未知游戏'}（原价 {_price_text(game)}）"]
-    time_text = str(game.get("free_end") if "截止" in time_label else game.get("free_start")) or ""
-    stamp = _to_ms(game.get("free_end_at")) if "截止" in time_label else _to_ms(game.get("free_start_at"))
-    remaining = _remaining_text(stamp, now)
-    suffix = f"（{remaining}）" if remaining else ""
-    lines.append(f"   {time_label} {time_text}{suffix}".rstrip())
-    if game.get("link"):
-        lines.append(f"   🔗 {game['link']}")
-    return lines
+def _epic_game_block(game, now, kind):
+    """单款游戏的公告内容，返回 [标题块, 明细列表块]。kind: urgent / free / upcoming。"""
+    title = str(game.get("title") or "未知游戏")
+    price = _price_text(game)
+    if kind == "upcoming":
+        stamp = str(game.get("free_start") or "").strip()
+        remaining = _remaining_text(_to_ms(game.get("free_start_at")), now)
+        items = [f"- **原价 {price} → 即将免费**"]
+        label, link_text = "开始时间", "查看游戏"
+    else:
+        stamp = str(game.get("free_end") or "").strip()
+        remaining = _remaining_text(_to_ms(game.get("free_end_at")), now)
+        items = [f"- **原价 {price} → 免费**"]
+        label, link_text = "领取截止", "立即领取"
+    if stamp:
+        suffix = f"（{remaining}）" if remaining and kind != "urgent" else ""
+        items.append(f"- ⏰ **{label} {stamp}**{suffix}")
+    if kind == "urgent" and remaining:
+        items.append(f"- 🚨 **{remaining}，抓紧领取！**")
+    link = str(game.get("link") or "").strip()
+    if link:
+        items.append(f"- 🔗 [{link_text}]({link})")
+    return [[f"### ⚠️ {title}" if kind == "urgent" else f"### {title}"], items]
 
 
 def _fmt_usage(usage):
