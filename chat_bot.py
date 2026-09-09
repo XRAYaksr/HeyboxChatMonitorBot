@@ -31,6 +31,7 @@ BASE_URL = "https://chat.xiaoheihe.cn"
 WS_CONNECT_URL = "wss://chat.xiaoheihe.cn/chatroom/ws/connect"
 FORTUNE_API_URL = "https://60s.viki.moe/v2/luck"
 EPIC_FREE_API_URL = "https://uapis.cn/api/v1/game/epic-free"
+EGDATA_BASE_URL = "https://api.egdata.app"
 DB_FILE = "voice_monitor.db"
 
 COMMON_PARAMS = {
@@ -53,6 +54,73 @@ MSG_TYPE_MD_AT = 10
 ROOM_USER_PAGE_LIMIT = 300
 DEFAULT_EPIC_PUSH_TIMES = ["00:00"]
 EPIC_ENDING_SOON_HOURS = 24
+EGDATA_TIMEOUT_SECONDS = 15
+EPIC_RATING_CACHE_DAYS = 7
+EPIC_GENRE_LIMIT = 3
+
+# egdata 的 genre 分组标签（键为小写标签名）。只认这张表里的标签，
+# 平台（Windows/iOS）、促销（Spring Sale）、成就等噪声标签会被自动忽略。
+EPIC_GENRE_CN = {
+    "action": "动作",
+    "action-adventure": "动作冒险",
+    "adventure": "冒险",
+    "card game": "卡牌",
+    "casual": "休闲",
+    "city builder": "城市建造",
+    "comedy": "喜剧",
+    "dungeon crawler": "地牢爬行",
+    "exploration": "探索",
+    "fantasy": "奇幻",
+    "fighting": "格斗",
+    "first person": "第一人称",
+    "horror": "恐怖",
+    "indie": "独立",
+    "moba": "MOBA",
+    "music": "音乐",
+    "narration": "叙事",
+    "open world": "开放世界",
+    "party": "聚会",
+    "platformer": "平台跳跃",
+    "puzzle": "解谜",
+    "rpg": "角色扮演",
+    "rts": "即时战略",
+    "racing": "竞速",
+    "retro": "复古",
+    "rhythm": "节奏",
+    "rogue-lite": "Roguelite",
+    "roguelite": "Roguelite",
+    "shooter": "射击",
+    "simulation": "模拟",
+    "space": "太空",
+    "sports": "体育",
+    "stealth": "潜行",
+    "strategy": "策略",
+    "survival": "生存",
+    "tower defense": "塔防",
+    "trivia": "问答",
+    "turn-based": "回合制",
+    "turn-based strategy": "回合策略",
+}
+
+# 联机/玩家规模标签，按展示优先级排列；未收录的标签忽略。
+EPIC_ONLINE_CN = [
+    ("massively multiplayer", "大型多人"),
+    ("mmo", "大型多人"),
+    ("mmorpg", "大型多人"),
+    ("online multiplayer", "在线多人"),
+    ("online co-op", "在线合作"),
+    ("local multiplayer", "本地多人"),
+    ("local co-op", "本地合作"),
+    ("split screen", "分屏"),
+    ("shared/split screen", "分屏"),
+    ("cross multiplayer", "跨平台多人"),
+    ("cross platform", "跨平台"),
+    ("co-op", "合作"),
+    ("multiplayer", "多人"),
+    ("competitive", "竞技"),
+    ("vr", "VR"),
+    ("single player", "单人"),
+]
 
 
 class BotStore:
@@ -891,7 +959,77 @@ class ChatBot:
         games = payload.get("data")
         if not isinstance(games, list):
             raise RuntimeError("Epic 接口返回格式异常：" + json.dumps(payload, ensure_ascii=False)[:200])
-        return [g for g in games if isinstance(g, dict)]
+        games = [g for g in games if isinstance(g, dict)]
+        try:
+            self._enrich_epic_games(games)
+        except Exception as exc:
+            print(f"[bot] egdata 补充信息失败，按纯文本推送：{exc}")
+        return games
+
+    # ---- egdata.app 补充信息（类型 / 联机 / 评分），全部失败也不影响推送 ----
+
+    def _egdata_get(self, path):
+        response = requests.get(
+            f"{EGDATA_BASE_URL}{path}",
+            headers={"User-Agent": "HeyChatVoiceMonitor/1.0"},
+            timeout=EGDATA_TIMEOUT_SECONDS,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    def _egdata_free_game_tags(self):
+        """一次请求拿到当前免费游戏的标签：{offer_id: [标签名]}；接口失败返回 None。"""
+        try:
+            payload = self._egdata_get("/free-games")
+        except Exception as exc:
+            print(f"[bot] egdata 标签接口失败，跳过类型/联机信息：{exc}")
+            return None
+        result = {}
+        for item in payload or []:
+            if not isinstance(item, dict):
+                continue
+            offer_id = _safe_offer_id(item.get("id") or item.get("_id"))
+            names = [str(t.get("name") or "").strip()
+                     for t in (item.get("tags") or []) if isinstance(t, dict)]
+            if offer_id and any(names):
+                result[offer_id] = [n for n in names if n]
+        return result
+
+    def _egdata_rating(self, offer_id):
+        """egdata 评分，按 offer ID 缓存（含 404 的否定结果）；网络异常时不写缓存。"""
+        key = f"bot:epic:rating:{offer_id}"
+        cached = self.store.get_json(key)
+        cache_days = EPIC_RATING_CACHE_DAYS * 86400
+        if isinstance(cached, dict) and time.time() - float(cached.get("ts") or 0) < cache_days:
+            return cached.get("data") or None
+        try:
+            payload = self._egdata_get(f"/offers/{offer_id}/ratings")
+        except Exception as exc:
+            print(f"[bot] egdata 评分接口失败（{offer_id}）：{exc}")
+            return None
+        data = None
+        if isinstance(payload, dict):
+            critic = _score_number(payload.get("criticAverage"))
+            recommend = _score_number(payload.get("recommendPercentage"))
+            if critic is not None or recommend is not None:
+                data = {"critic": critic, "recommend": recommend}
+        self.store.set_json(key, {"ts": time.time(), "data": data})
+        return data
+
+    def _enrich_epic_games(self, games):
+        tag_map = self._egdata_free_game_tags()
+        if tag_map is None:
+            return
+        for game in games:
+            offer_id = _safe_offer_id(game.get("id"))
+            if not offer_id:
+                continue
+            game["_egdata"] = {
+                "tags": tag_map.get(offer_id) or [],
+                "rating": self._egdata_rating(offer_id),
+            }
 
     def build_epic_message(self, games, now=None):
         now = now or datetime.now()
@@ -928,6 +1066,7 @@ class ChatBot:
             for game in upcoming[:3]:
                 blocks.extend(_epic_game_block(game, now, "upcoming"))
         blocks.append(["💡 Epic 通常在每天 23:00 轮换，下期 00:00 速递见"])
+        blocks.append(["📊 类型/联机/评分数据来源：egdata.app"])
         # 不内嵌封面图：markdown 图片只认黑盒 CDN，Epic 外链会让整条消息被判「图片链接地址不合法」发送失败
         return "\n\n".join("\n".join(block) for block in blocks)
 
@@ -981,6 +1120,50 @@ def _to_ms(value):
         return None
 
 
+def _safe_offer_id(value):
+    """校验 offer ID 可安全拼进 URL 路径：仅字母数字与连字符，长度 8~64。"""
+    text = str(value or "").strip()
+    if 8 <= len(text) <= 64 and all(c.isalnum() or c == "-" for c in text):
+        return text
+    return ""
+
+
+def _score_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = int(value)
+    return number if 0 <= number <= 100 else None
+
+
+def _epic_genre_text(tags):
+    seen, names = set(), []
+    for tag in tags:
+        name = EPIC_GENRE_CN.get(tag.strip().lower())
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return " / ".join(names[:EPIC_GENRE_LIMIT])
+
+
+def _epic_online_text(tags):
+    lowered = {tag.strip().lower() for tag in tags}
+    names = [cn for key, cn in EPIC_ONLINE_CN if key in lowered]
+    if len(names) > 1 and "单人" in names:
+        names.remove("单人")
+    return " / ".join(dict.fromkeys(names))
+
+
+def _epic_rating_text(rating):
+    if not rating:
+        return ""
+    parts = []
+    if rating.get("critic") is not None:
+        parts.append(f"媒体评分 {rating['critic']}/100")
+    if rating.get("recommend") is not None:
+        parts.append(f"推荐率 {rating['recommend']}%")
+    return "、".join(parts)
+
+
 def _price_text(game):
     desc = str(game.get("original_price_desc") or "").strip()
     if desc:
@@ -1021,6 +1204,17 @@ def _epic_game_block(game, now, kind):
         items.append(f"- ⏰ **{label} {stamp}**{suffix}")
     if kind == "urgent" and remaining:
         items.append(f"- 🚨 **{remaining}，抓紧领取！**")
+    meta = game.get("_egdata") or {}
+    tags = meta.get("tags") or []
+    genre = _epic_genre_text(tags)
+    if genre:
+        items.append(f"- 🏷️ 类型：{genre}")
+    online = _epic_online_text(tags)
+    if online:
+        items.append(f"- 👥 联机：{online}")
+    rating = _epic_rating_text(meta.get("rating"))
+    if rating:
+        items.append(f"- ⭐ {rating}")
     link = str(game.get("link") or "").strip()
     if link:
         items.append(f"- 🔗 [{link_text}]({link})")
