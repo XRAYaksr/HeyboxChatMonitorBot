@@ -917,9 +917,7 @@ class ChatBot:
             lines.append("【即将免费】")
             for game in upcoming[:3]:
                 lines.extend(_epic_game_lines(game, "⏰ 开始时间", now))
-        covers = [g.get("cover") for g in free_now if g.get("cover")][:3]
-        for cover in covers:
-            lines.append(f"![]({cover})")
+        # 不内嵌封面图：markdown 图片只认黑盒 CDN，Epic 外链会让整条消息被判「图片链接地址不合法」发送失败
         return "\n".join(lines)
 
     def push_epic_to_channel(self):
