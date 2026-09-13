@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 语音频道监控：麦克风 + 两侧声波，图形保持在 72dp 安全区内 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M46,36 Q46,28 54,28 Q62,28 62,36 L62,50 Q62,58 54,58 Q46,58 46,50 Z" />
+    <path
+        android:pathData="M40,46 Q40,64 54,64 Q68,64 68,46"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M54,64 L54,74"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M45,74 L63,74"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M32,38 L32,56"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M76,38 L76,56"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round" />
+</vector>

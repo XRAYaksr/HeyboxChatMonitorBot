@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">黑盒语音监控</string>
+
+    <!-- 通用 -->
+    <string name="ok">好</string>
+    <string name="cancel">取消</string>
+    <string name="save">保存</string>
+    <string name="close">关闭</string>
+    <string name="retry">重试</string>
+    <string name="refresh">刷新</string>
+    <string name="loading">加载中…</string>
+    <string name="search">搜索</string>
+    <string name="back">返回</string>
+    <string name="clear">清空</string>
+    <string name="unknown_user">未知用户</string>
+
+    <!-- 登录 -->
+    <string name="login_title">登录到服务器</string>
+    <string name="login_server_ip">服务器 IP</string>
+    <string name="login_secret">密钥</string>
+    <string name="login_server_hint">例：192.168.1.20:8080</string>
+    <string name="login_secret_hint">面板访问密码</string>
+    <string name="login_invalid_server">请输入正确的服务器地址（IP 或 IP:端口）</string>
+    <string name="login_empty_secret">请输入密钥</string>
+    <string name="login_action">登录</string>
+    <string name="login_connecting">正在验证…</string>
+    <string name="login_success">登录成功</string>
+    <string name="error_prefix">ERROR：%1$s</string>
+    <string name="error_network">无法连接服务器，请检查地址与网络</string>
+    <string name="error_unauthorized">密钥错误</string>
+    <string name="error_locked">尝试次数过多，请稍后再试</string>
+    <string name="error_http">服务器返回错误（%1$d）</string>
+    <string name="error_parse">响应格式异常</string>
+    <string name="error_generic">操作失败</string>
+    <string name="show_password">显示密码</string>
+    <string name="hide_password">隐藏密码</string>
+
+    <!-- 导航 -->
+    <string name="nav_room">房间</string>
+    <string name="nav_live">频道实况</string>
+    <string name="nav_history">在线记录</string>
+    <string name="nav_settings">设置</string>
+
+    <!-- 主界面 / 房间卡片 -->
+    <string name="room_card_title">%1$s</string>
+    <string name="room_not_monitored_channel">%1$s 个频道监控中</string>
+    <string name="room_online_now">当前在线 %1$d 人</string>
+    <string name="room_avatar_desc">房间头像</string>
+    <string name="room_no_intro">暂无房间简介</string>
+    <string name="room_load_failed">房间信息获取失败</string>
+    <string name="room_id_label">房间 ID：%1$s</string>
+
+    <!-- 机器人状态 -->
+    <string name="bot_status_title">机器人运行状态</string>
+    <string name="bot_status_running">本次启动已运行 %1$s</string>
+    <string name="bot_status_normal">运行正常</string>
+    <string name="bot_status_degraded">部分频道异常</string>
+    <string name="bot_status_stopped">轮询已停止</string>
+    <string name="bot_ws_connected">命令长连接正常</string>
+    <string name="bot_ws_disconnected">命令长连接已断开</string>
+    <string name="bot_ws_disabled">命令功能未启用</string>
+    <string name="bot_last_poll">最近轮询 %1$s</string>
+    <string name="bot_poll_interval">轮询间隔 %1$d 秒</string>
+    <string name="bot_error_count">%1$d 个频道请求失败</string>
+    <string name="bot_error_detail">频道 %1$s：%2$s</string>
+    <string name="uptime_format">%1$d天%2$d时%3$d分</string>
+
+    <!-- 频道实况 -->
+    <string name="live_title">频道实况</string>
+    <string name="live_channel_headcount">%1$d 人在线</string>
+    <string name="live_empty_channel">该频道当前无人</string>
+    <string name="live_since">进入于 %1$s</string>
+    <string name="live_current_duration">已在线 %1$s</string>
+    <string name="live_no_data">暂无在线数据，等待下一次轮询</string>
+    <string name="live_last_update">更新于 %1$s</string>
+    <string name="live_recent_left_title">最近离开</string>
+    <string name="live_ago">%1$s 前离开</string>
+
+    <!-- 成员管理 -->
+    <string name="member_actions_title">成员管理</string>
+    <string name="member_user_id">UID %1$s</string>
+    <string name="member_send_mention">@提醒 TA</string>
+    <string name="member_mention_hint">提醒消息内容</string>
+    <string name="member_mention_sent">已在频道内提醒</string>
+    <string name="member_roles_title">身份组</string>
+    <string name="member_roles_empty">房间暂无身份组</string>
+    <string name="member_role_grant">授予</string>
+    <string name="member_role_revoke">撤销</string>
+    <string name="member_role_granted">已授予「%1$s」</string>
+    <string name="member_role_revoked">已撤销「%1$s」</string>
+    <string name="member_view_history">查看 TA 的记录</string>
+    <string name="unsupported_hint">黑盒机器人接口未提供该操作</string>
+
+    <!-- 在线记录 -->
+    <string name="history_title">在线记录</string>
+    <string name="history_filter_user">按用户 / UID 筛选</string>
+    <string name="history_filter_channel">全部频道</string>
+    <string name="history_filter_date">全部日期</string>
+    <string name="history_join">进入 %1$s</string>
+    <string name="history_leave">离开 %1$s</string>
+    <string name="history_ongoing">进行中</string>
+    <string name="history_duration">在线 %1$s</string>
+    <string name="history_empty">没有匹配的记录</string>
+    <string name="history_total">共 %1$d 条</string>
+    <string name="history_summary">累计在线时长</string>
+    <string name="history_sessions">%1$d 次</string>
+    <string name="history_archived">已归档</string>
+    <string name="history_edit">编辑</string>
+    <string name="history_delete">删除</string>
+    <string name="history_edit_title">修正上下线时间</string>
+    <string name="history_edit_join">进入时间</string>
+    <string name="history_edit_leave">离开时间</string>
+    <string name="history_edit_hint">格式 2026-09-06 14:30，留空表示未知</string>
+    <string name="history_delete_title">删除这条记录？</string>
+    <string name="history_delete_body">删除后无法恢复，该用户的在线时长统计会随之变化。</string>
+    <string name="history_deleted">记录已删除</string>
+    <string name="history_updated">记录已更新</string>
+    <string name="edit_password_title">请输入编辑密码</string>
+    <string name="edit_password_body">编辑与删除记录需要 config.json 中独立的 edit_password。</string>
+    <string name="edit_password_label">编辑密码</string>
+    <string name="edit_password_disabled">服务器未设置编辑密码，记录编辑功能已禁用</string>
+    <string name="load_more">加载更多</string>
+
+    <!-- 发频道消息 -->
+    <string name="send_title">发送频道消息</string>
+    <string name="send_channel">目标频道</string>
+    <string name="send_content">消息内容</string>
+    <string name="send_content_hint">支持 Markdown，最多 2000 字</string>
+    <string name="send_action">发送</string>
+    <string name="send_success">消息已发送</string>
+    <string name="send_empty">请输入要发送的内容</string>
+    <string name="send_no_channel">暂无可发送的频道</string>
+    <string name="send_entry">向频道发送消息</string>
+
+    <!-- 设置 -->
+    <string name="settings_title">设置</string>
+    <string name="settings_app_group">APP 设置</string>
+    <string name="settings_bot_group">机器人设置</string>
+    <string name="settings_language">语言</string>
+    <string name="settings_language_desc">界面文字语言</string>
+    <string name="settings_language_zh">简体中文</string>
+    <string name="settings_language_en">English</string>
+    <string name="settings_theme">深浅色</string>
+    <string name="settings_theme_desc">本次交付仅提供浅色模式</string>
+    <string name="settings_theme_light">浅色</string>
+    <string name="settings_theme_system">跟随系统</string>
+    <string name="settings_server_group">服务器</string>
+    <string name="settings_server_address">服务器地址</string>
+    <string name="settings_logout">登出服务器</string>
+    <string name="settings_logout_desc">清除本机保存的会话与密钥</string>
+    <string name="settings_logout_title">确认登出？</string>
+    <string name="settings_logout_body">将清除本机的会话令牌与密钥，需要重新登录才能查看数据。</string>
+    <string name="settings_logged_out">已登出</string>
+    <string name="settings_about">关于</string>
+    <string name="settings_version">版本 %1$s</string>
+
+    <!-- 机器人设置项 -->
+    <string name="cfg_poll_interval">轮询间隔</string>
+    <string name="cfg_poll_interval_desc">1〜3600 秒，改动立即生效</string>
+    <string name="cfg_bot_enabled">斜杠命令机器人</string>
+    <string name="cfg_bot_enabled_desc">/fortune /pick /init /help</string>
+    <string name="cfg_record_initial">启动时记录已在线用户</string>
+    <string name="cfg_record_initial_desc">仅记录下线时间，不计时长</string>
+    <string name="cfg_channels">监控频道</string>
+    <string name="cfg_channels_desc">勾选需要统计在线时长的语音频道</string>
+    <string name="cfg_channels_changed">已保存监控频道（%1$d 个）</string>
+    <string name="cfg_epic_channel">Epic 推送频道</string>
+    <string name="cfg_epic_channel_desc">留空则不推送</string>
+    <string name="cfg_epic_times">Epic 推送时间</string>
+    <string name="cfg_epic_times_desc">逗号分隔的 HH:MM</string>
+    <string name="cfg_edit_password">编辑密码</string>
+    <string name="cfg_edit_password_desc">用于记录编辑、身份组与配置写入</string>
+    <string name="cfg_edit_password_set">已设置</string>
+    <string name="cfg_edit_password_unset">未设置（相关功能已禁用）</string>
+    <string name="cfg_room_id">房间 ID</string>
+    <string name="cfg_bot_id">机器人 ID</string>
+    <string name="cfg_token">机器人 Token</string>
+    <string name="cfg_web_port">面板端口</string>
+    <string name="cfg_saved">配置已保存</string>
+    <string name="cfg_restart_needed">部分改动需重启机器人进程后生效：%1$s</string>
+    <string name="cfg_invalid_number">请输入 1〜3600 之间的整数</string>
+    <string name="cfg_no_channels">房间频道列表尚未加载</string>
+    <string name="settings_save_failed">保存失败</string>
+
+    <!-- 登录补充 -->
+    <string name="login_hint">填写监控面板所在服务器的地址与访问密钥</string>
+
+    <!-- 主界面 / 房间卡片补充 -->
+    <string name="room_click_hint">点击卡片重新获取房间信息</string>
+    <string name="bot_online_now">当前在线</string>
+    <string name="bot_poll_interval_value">%1$d 秒 / 次</string>
+    <string name="bot_command_channel">命令长连接</string>
+
+    <!-- 频道实况补充 -->
+    <string name="live_empty_hint">机器人完成一次轮询后才会显示在线成员</string>
+    <string name="live_channel_monitored">%1$d 人在线 · 统计时长</string>
+    <string name="member_channel">所在频道</string>
+    <string name="member_join_time">进入时间</string>
+    <string name="member_online_now">本次已在线</string>
+    <string name="member_unsupported_note">平台机器人接口只提供身份组授予／撤销与频道消息，不支持禁言、移出房间或私聊。</string>
+
+    <!-- 在线记录补充 -->
+    <string name="history_empty_hint">调整筛选条件，或等待下一次轮询产生记录</string>
+    <string name="history_retention_note">超过 3 天的记录会自动归档，仍计入累计时长。</string>
+    <string name="history_include_archived">包含 3 天前的归档记录</string>
+    <string name="history_date_hint">格式 2026-09-06</string>
+    <string name="history_invalid_date">日期格式应为 2026-09-06</string>
+    <string name="history_date_today">填入今天</string>
+    <string name="history_edit_requires_password">保存需要 config.json 中独立的编辑密码</string>
+    <string name="history_invalid_time">时间格式应为 2026-09-06 14:30</string>
+
+    <!-- 发送消息补充 -->
+    <string name="send_mentioning">@ %1$s</string>
+    <string name="send_counter">%1$d / %2$d</string>
+    <string name="send_too_long">已超出 %2$d 字上限（当前 %1$d 字）</string>
+
+    <!-- 设置与配置补充 -->
+    <string name="settings_language_system">跟随系统</string>
+    <string name="settings_capability_note">App 与网页面板共用同一套后端接口，数据实时来自服务器。</string>
+    <string name="cfg_monitor_group">监控</string>
+    <string name="cfg_push_group">推送</string>
+    <string name="cfg_credentials_group">身份与凭据</string>
+    <string name="cfg_admins">命令管理员 UID</string>
+    <string name="cfg_admins_desc">逗号分隔，仅这些账号可使用斜杠命令</string>
+    <string name="cfg_epic_channel_none">不推送</string>
+    <string name="cfg_epic_times_invalid">时间格式应为 HH:MM，逗号分隔</string>
+    <string name="cfg_id_restart_note">改动需重启机器人进程后生效</string>
+    <string name="cfg_web_port_desc">面板 HTTP 端口，改动后需重启进程</string>
+    <string name="cfg_token_desc">留空保持不变，当前 %1$s</string>
+    <string name="cfg_web_password_note">面板登录密钥只能由服务器 config.json 修改，App 不提供写入。</string>
+    <string name="cfg_reset">放弃改动</string>
+    <string name="cfg_no_change">没有需要保存的改动</string>
+    <string name="edit_password_required">该操作需要编辑密码，请输入后再试</string>
+</resources>

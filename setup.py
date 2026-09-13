@@ -46,33 +46,41 @@ def get_rooms():
 def get_room(room_id):
     return api_get("/chatroom/v2/room/view", {"room_id": str(room_id)})
 
-def extract_channels(value):
-    """递归扫描整个 /room/view result，寻找包含 channel_id 的对象。"""
-    found, seen = [], set()
+CHANNEL_TYPE_NAMES = {0: "语音", 1: "文字", 2: "公告", 3: "分区"}
 
-    def walk(x):
-        if isinstance(x, dict):
-            if x.get("channel_id") is not None:
-                cid = str(x["channel_id"])
-                if cid not in seen:
-                    seen.add(cid)
-                    found.append(x)
-            for v in x.values():
-                walk(v)
-        elif isinstance(x, list):
-            for v in x:
-                walk(v)
+def extract_channels(result):
+    """按 /room/view 的 channel_list 层级展开真实频道。
 
-    walk(value)
+    分区（channel_type=3）只是分组标题，channel_id 为 "0" 的对象来自房间配置，
+    两者都不是可选频道。
+    """
+    found = []
+
+    def walk(nodes):
+        for ch in nodes or []:
+            if not isinstance(ch, dict):
+                continue
+            cid = str(ch.get("channel_id") or "").strip()
+            try:
+                ctype = int(str(ch.get("channel_type")).strip())
+            except (TypeError, ValueError):
+                ctype = None
+            if cid and cid != "0" and ctype != 3:
+                found.append(ch)
+            walk(ch.get("channel_list"))
+
+    walk((result.get("room_info") or {}).get("channels"))
     return found
 
 def channel_text(ch):
     name = ch.get("channel_name") or ch.get("name") or "(无名称)"
-    return (
-        f"{name} | channel_id={ch.get('channel_id')} | "
-        f"channel_type={ch.get('channel_type', '')} | "
-        f"api_type={ch.get('api_type', '')}"
-    )
+    raw_type = ch.get("channel_type", "")
+    try:
+        label = CHANNEL_TYPE_NAMES.get(int(str(raw_type).strip()), "")
+    except (TypeError, ValueError):
+        label = ""
+    type_text = f"{raw_type}（{label}）" if label else str(raw_type)
+    return f"{name} | channel_id={ch.get('channel_id')} | channel_type={type_text}"
 
 def main():
     if not BOT_TOKEN or "你的机器人" in BOT_TOKEN:

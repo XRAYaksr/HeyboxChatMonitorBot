@@ -31,6 +31,7 @@ BASE_URL = "https://chat.xiaoheihe.cn"
 WS_CONNECT_URL = "wss://chat.xiaoheihe.cn/chatroom/ws/connect"
 FORTUNE_API_URL = "https://60s.viki.moe/v2/luck"
 EPIC_FREE_API_URL = "https://uapis.cn/api/v1/game/epic-free"
+EGDATA_BASE_URL = "https://api.egdata.app"
 DB_FILE = "voice_monitor.db"
 
 COMMON_PARAMS = {
@@ -52,6 +53,74 @@ MSG_TYPE_MD = 4
 MSG_TYPE_MD_AT = 10
 ROOM_USER_PAGE_LIMIT = 300
 DEFAULT_EPIC_PUSH_TIMES = ["12:00"]
+EPIC_ENDING_SOON_HOURS = 24
+EGDATA_TIMEOUT_SECONDS = 15
+EPIC_RATING_CACHE_DAYS = 7
+EPIC_GENRE_LIMIT = 3
+
+# egdata 的 genre 分组标签（键为小写标签名）。只认这张表里的标签，
+# 平台（Windows/iOS）、促销（Spring Sale）、成就等噪声标签会被自动忽略。
+EPIC_GENRE_CN = {
+    "action": "动作",
+    "action-adventure": "动作冒险",
+    "adventure": "冒险",
+    "card game": "卡牌",
+    "casual": "休闲",
+    "city builder": "城市建造",
+    "comedy": "喜剧",
+    "dungeon crawler": "地牢爬行",
+    "exploration": "探索",
+    "fantasy": "奇幻",
+    "fighting": "格斗",
+    "first person": "第一人称",
+    "horror": "恐怖",
+    "indie": "独立",
+    "moba": "MOBA",
+    "music": "音乐",
+    "narration": "叙事",
+    "open world": "开放世界",
+    "party": "聚会",
+    "platformer": "平台跳跃",
+    "puzzle": "解谜",
+    "rpg": "角色扮演",
+    "rts": "即时战略",
+    "racing": "竞速",
+    "retro": "复古",
+    "rhythm": "节奏",
+    "rogue-lite": "Roguelite",
+    "roguelite": "Roguelite",
+    "shooter": "射击",
+    "simulation": "模拟",
+    "space": "太空",
+    "sports": "体育",
+    "stealth": "潜行",
+    "strategy": "策略",
+    "survival": "生存",
+    "tower defense": "塔防",
+    "trivia": "问答",
+    "turn-based": "回合制",
+    "turn-based strategy": "回合策略",
+}
+
+# 联机/玩家规模标签，按展示优先级排列；未收录的标签忽略。
+EPIC_ONLINE_CN = [
+    ("massively multiplayer", "大型多人"),
+    ("mmo", "大型多人"),
+    ("mmorpg", "大型多人"),
+    ("online multiplayer", "在线多人"),
+    ("online co-op", "在线合作"),
+    ("local multiplayer", "本地多人"),
+    ("local co-op", "本地合作"),
+    ("split screen", "分屏"),
+    ("shared/split screen", "分屏"),
+    ("cross multiplayer", "跨平台多人"),
+    ("cross platform", "跨平台"),
+    ("co-op", "合作"),
+    ("multiplayer", "多人"),
+    ("competitive", "竞技"),
+    ("vr", "VR"),
+    ("single player", "单人"),
+]
 
 
 class BotStore:
@@ -95,34 +164,39 @@ class BotStore:
             self.conn.close()
 
 
-def walk_channels(value, found=None, seen=None):
-    """递归扫描 room/view 的 result，收集所有带 channel_id 的对象（与 setup.py 一致）。"""
+CHANNEL_TYPE_VOICE = 0
+CHANNEL_TYPE_CATEGORY = 3
+
+
+def collect_channels(nodes, found=None):
+    """按 room/view 的 channel_list 层级收集真实频道。
+
+    分区（channel_type=3）只是分组标题，`channel_id` 为 "0" 的对象来自房间配置，
+    两者都不是可收发消息的频道，跳过但仍继续下钻。
+    """
     if found is None:
-        found, seen = [], set()
-    if isinstance(value, dict):
-        channel_id = value.get("channel_id")
-        if channel_id is not None:
-            cid = str(channel_id)
-            if cid not in seen:
-                seen.add(cid)
-                found.append(value)
-        for child in value.values():
-            walk_channels(child, found, seen)
-    elif isinstance(value, list):
-        for child in value:
-            walk_channels(child, found, seen)
+        found = []
+    for channel in nodes or []:
+        if not isinstance(channel, dict):
+            continue
+        channel_id = str(channel.get("channel_id") or "").strip()
+        channel_type = to_channel_type(channel.get("channel_type"))
+        if channel_id and channel_id != "0" and channel_type != CHANNEL_TYPE_CATEGORY:
+            found.append(channel)
+        collect_channels(channel.get("channel_list"), found)
     return found
 
 
+def to_channel_type(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def looks_like_voice_channel(channel):
-    """判断是否语音频道：文字频道 channel_type=1；语音频道带 rtc 类 api_type 或其他类型。"""
-    channel_type = channel.get("channel_type")
-    api_type = str(channel.get("api_type") or "").lower()
-    if api_type in ("trtc", "volc", "rtc"):
-        return True
-    if channel_type == 1:
-        return False
-    return channel_type not in (None, 0)
+    """语音频道 channel_type=0；1=文字、2=公告、3=分区。api_type 所有频道都有，不能用来判定。"""
+    return to_channel_type(channel.get("channel_type")) == CHANNEL_TYPE_VOICE
 
 
 def parse_push_times(raw):
@@ -220,6 +294,10 @@ class ChatBot:
         self._aliases_lock = threading.Lock()
 
     # ------------------------------------------------------------------ 启动
+
+    def is_connected(self):
+        """WebSocket 当前是否处于连接状态（用于面板/App 展示运行健康度）。"""
+        return self.enabled and self.ws is not None
 
     def start_background(self):
         if not self.enabled:
@@ -538,9 +616,9 @@ class ChatBot:
         return online
 
     def get_room_channels(self):
-        """房间全部频道（递归扫描 room/view）。"""
+        """房间全部频道（按 room/view 的频道层级展开，不含分区）。"""
         result = self._api_get("/chatroom/v2/room/view", {"room_id": self.room_id})
-        return walk_channels(result)
+        return collect_channels((result.get("room_info") or {}).get("channels"))
 
     def get_room_members(self):
         """房间全部成员（分页）。"""
@@ -559,6 +637,69 @@ class ChatBot:
             if len(page) < ROOM_USER_PAGE_LIMIT:
                 break
         return [m for m in members if isinstance(m, dict)]
+
+    # ------------------------------------------------------------ 身份组管理
+
+    def list_roles(self):
+        """房间身份组列表，规范化为 [{id, name}]。"""
+        result = self._api_get("/chatroom/v2/room_role/roles", {"room_id": self.room_id})
+        roles = result.get("roles") if isinstance(result, dict) else result
+        normalized = []
+        for role in roles or []:
+            if not isinstance(role, dict):
+                continue
+            rid = str(role.get("id") or role.get("role_id") or "").strip()
+            if not rid:
+                continue
+            normalized.append({
+                "id": rid,
+                "name": str(role.get("name") or role.get("role_name") or "").strip() or rid,
+                "color": str(role.get("color") or role.get("role_color") or "").strip(),
+            })
+        return normalized
+
+    def roles_of(self, user_id):
+        """成员当前持有的身份组 ID 集合。房间用户列表里带 role_ids 时可用。"""
+        user_id = str(user_id)
+        for member in self.get_room_members():
+            if str(member.get("user_id") or "") != user_id:
+                continue
+            raw = member.get("role_ids") or member.get("roles") or []
+            if isinstance(raw, str):
+                raw = [x for x in raw.split(",") if x.strip()]
+            out = set()
+            for item in raw:
+                rid = str(item.get("id") or item.get("role_id") or item).strip() \
+                    if isinstance(item, dict) else str(item).strip()
+                if rid:
+                    out.add(rid)
+            return out
+        return set()
+
+    def grant_role(self, user_id, role_id):
+        return self._role_request("/chatroom/v2/room_role/grant", user_id, role_id, "授予身份组")
+
+    def revoke_role(self, user_id, role_id):
+        return self._role_request("/chatroom/v2/room_role/revoke", user_id, role_id, "撤销身份组")
+
+    def _role_request(self, path, user_id, role_id, action):
+        body = {
+            "to_user_id": int(user_id),
+            "role_id": str(role_id),
+            "room_id": str(self.room_id),
+        }
+        response = requests.post(
+            BASE_URL + path,
+            params=COMMON_PARAMS,
+            headers={"token": self.token, "Content-Type": "application/json;charset=UTF-8"},
+            json=body,
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("status") != "ok":
+            raise RuntimeError(f"{action}失败：" + json.dumps(payload, ensure_ascii=False))
+        return payload
 
     # ------------------------------------------------------ 频道编号与管理员
 
@@ -890,37 +1031,116 @@ class ChatBot:
         games = payload.get("data")
         if not isinstance(games, list):
             raise RuntimeError("Epic 接口返回格式异常：" + json.dumps(payload, ensure_ascii=False)[:200])
-        return [g for g in games if isinstance(g, dict)]
+        games = [g for g in games if isinstance(g, dict)]
+        try:
+            self._enrich_epic_games(games)
+        except Exception as exc:
+            print(f"[bot] egdata 补充信息失败，按纯文本推送：{exc}")
+        return games
+
+    # ---- egdata.app 补充信息（类型 / 联机 / 评分），全部失败也不影响推送 ----
+
+    def _egdata_get(self, path):
+        response = requests.get(
+            f"{EGDATA_BASE_URL}{path}",
+            headers={"User-Agent": "HeyChatVoiceMonitor/1.0"},
+            timeout=EGDATA_TIMEOUT_SECONDS,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    def _egdata_free_game_tags(self):
+        """一次请求拿到当前免费游戏的标签：{offer_id: [标签名]}；接口失败返回 None。"""
+        try:
+            payload = self._egdata_get("/free-games")
+        except Exception as exc:
+            print(f"[bot] egdata 标签接口失败，跳过类型/联机信息：{exc}")
+            return None
+        result = {}
+        for item in payload or []:
+            if not isinstance(item, dict):
+                continue
+            offer_id = _safe_offer_id(item.get("id") or item.get("_id"))
+            names = [str(t.get("name") or "").strip()
+                     for t in (item.get("tags") or []) if isinstance(t, dict)]
+            if offer_id and any(names):
+                result[offer_id] = [n for n in names if n]
+        return result
+
+    def _egdata_rating(self, offer_id):
+        """egdata 评分，按 offer ID 缓存（含 404 的否定结果）；网络异常时不写缓存。"""
+        key = f"bot:epic:rating:{offer_id}"
+        cached = self.store.get_json(key)
+        cache_days = EPIC_RATING_CACHE_DAYS * 86400
+        if isinstance(cached, dict) and time.time() - float(cached.get("ts") or 0) < cache_days:
+            return cached.get("data") or None
+        try:
+            payload = self._egdata_get(f"/offers/{offer_id}/ratings")
+        except Exception as exc:
+            print(f"[bot] egdata 评分接口失败（{offer_id}）：{exc}")
+            return None
+        data = None
+        if isinstance(payload, dict):
+            critic = _score_number(payload.get("criticAverage"))
+            recommend = _score_number(payload.get("recommendPercentage"))
+            if critic is not None or recommend is not None:
+                data = {"critic": critic, "recommend": recommend}
+        self.store.set_json(key, {"ts": time.time(), "data": data})
+        return data
+
+    def _enrich_epic_games(self, games):
+        tag_map = self._egdata_free_game_tags()
+        if tag_map is None:
+            return
+        for game in games:
+            offer_id = _safe_offer_id(game.get("id"))
+            if not offer_id:
+                continue
+            game["_egdata"] = {
+                "tags": tag_map.get(offer_id) or [],
+                "rating": self._egdata_rating(offer_id),
+            }
 
     def build_epic_message(self, games, now=None):
         now = now or datetime.now()
         now_ms = int(now.timestamp() * 1000)
-        free_now, upcoming = [], []
+        soon_limit = now_ms + EPIC_ENDING_SOON_HOURS * 3600 * 1000
+        ending_soon, free_now, upcoming = [], [], []
         for game in games:
             start_at = _to_ms(game.get("free_start_at"))
             end_at = _to_ms(game.get("free_end_at"))
             if game.get("is_free_now") or (start_at and start_at <= now_ms and (not end_at or end_at > now_ms)):
-                free_now.append(game)
+                if end_at and end_at <= soon_limit:
+                    ending_soon.append(game)
+                else:
+                    free_now.append(game)
             elif start_at and start_at > now_ms:
                 upcoming.append(game)
+        ending_soon.sort(key=lambda g: _to_ms(g.get("free_end_at")) or 0)
         upcoming.sort(key=lambda g: _to_ms(g.get("free_start_at")) or 0)
 
-        lines = ["🎮 Epic 免费游戏速递", ""]
-        lines.append("【现在可领】")
+        # 每个视觉单元单独成块（块间空行）：黑盒 markdown 会把段落内的单换行折叠成一行
+        blocks = [["# 🎮 Epic 免费游戏速递"], ["🎁 免费领取期间请及时入库，避免错过恢复原价"]]
+        if ending_soon:
+            blocks.append([f"## 🚨 即将结束（{EPIC_ENDING_SOON_HOURS} 小时内）"])
+            for game in ending_soon:
+                blocks.extend(_epic_game_block(game, now, "urgent"))
+        blocks.append(["## 🟢 现在可领"])
         if free_now:
             for game in free_now:
-                lines.extend(_epic_game_lines(game, "⏰ 领取截止", now))
+                blocks.extend(_epic_game_block(game, now, "free"))
         else:
-            lines.append("暂无")
+            blocks.append(["暂无"])
         if upcoming:
-            lines.append("")
-            lines.append("【即将免费】")
+            blocks.append(["## 🟡 即将免费"])
             for game in upcoming[:3]:
-                lines.extend(_epic_game_lines(game, "⏰ 开始时间", now))
-        covers = [g.get("cover") for g in free_now if g.get("cover")][:3]
-        for cover in covers:
-            lines.append(f"![]({cover})")
-        return "\n".join(lines)
+                blocks.extend(_epic_game_block(game, now, "upcoming"))
+        blocks.append(["💡 Epic 通常在每天 23:00 轮换，下期 00:00 速递见"])
+        blocks.append(["📊 类型/联机/评分数据来源：egdata.app"])
+        # 不内嵌封面图：markdown 图片只认黑盒 CDN，Epic 外链会让整条消息被判「图片链接地址不合法」发送失败
+        return "\n\n".join("\n".join(block) for block in blocks)
 
     def push_epic_to_channel(self):
         """定时推送：发送到 epic_push_channel_id 并返回推送内容摘要。"""
@@ -990,16 +1210,84 @@ def _remaining_text(end_ms, now):
     return f"还剩{hours}小时"
 
 
-def _epic_game_lines(game, time_label, now):
-    lines = [f"▫️ {game.get('title') or '未知游戏'}（原价 {_price_text(game)}）"]
-    time_text = str(game.get("free_end") if "截止" in time_label else game.get("free_start")) or ""
-    stamp = _to_ms(game.get("free_end_at")) if "截止" in time_label else _to_ms(game.get("free_start_at"))
-    remaining = _remaining_text(stamp, now)
-    suffix = f"（{remaining}）" if remaining else ""
-    lines.append(f"   {time_label} {time_text}{suffix}".rstrip())
-    if game.get("link"):
-        lines.append(f"   🔗 {game['link']}")
-    return lines
+def _safe_offer_id(value):
+    """校验 offer ID 可安全拼进 URL 路径：仅字母数字与连字符，长度 8~64。"""
+    text = str(value or "").strip()
+    if 8 <= len(text) <= 64 and all(c.isalnum() or c == "-" for c in text):
+        return text
+    return ""
+
+
+def _score_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = int(value)
+    return number if 0 <= number <= 100 else None
+
+
+def _epic_genre_text(tags):
+    seen, names = set(), []
+    for tag in tags:
+        name = EPIC_GENRE_CN.get(tag.strip().lower())
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return " / ".join(names[:EPIC_GENRE_LIMIT])
+
+
+def _epic_online_text(tags):
+    lowered = {tag.strip().lower() for tag in tags}
+    names = [cn for key, cn in EPIC_ONLINE_CN if key in lowered]
+    if len(names) > 1 and "单人" in names:
+        names.remove("单人")
+    return " / ".join(dict.fromkeys(names))
+
+
+def _epic_rating_text(rating):
+    if not rating:
+        return ""
+    parts = []
+    if rating.get("critic") is not None:
+        parts.append(f"媒体评分 {rating['critic']}/100")
+    if rating.get("recommend") is not None:
+        parts.append(f"推荐率 {rating['recommend']}%")
+    return "、".join(parts)
+
+
+def _epic_game_block(game, now, kind):
+    """单款游戏的公告内容，返回 [标题块, 明细列表块]。kind: urgent / free / upcoming。"""
+    title = str(game.get("title") or "未知游戏")
+    price = _price_text(game)
+    if kind == "upcoming":
+        stamp = str(game.get("free_start") or "").strip()
+        remaining = _remaining_text(_to_ms(game.get("free_start_at")), now)
+        items = [f"- **原价 {price} → 即将免费**"]
+        label, link_text = "开始时间", "查看游戏"
+    else:
+        stamp = str(game.get("free_end") or "").strip()
+        remaining = _remaining_text(_to_ms(game.get("free_end_at")), now)
+        items = [f"- **原价 {price} → 免费**"]
+        label, link_text = "领取截止", "立即领取"
+    if stamp:
+        suffix = f"（{remaining}）" if remaining and kind != "urgent" else ""
+        items.append(f"- ⏰ **{label} {stamp}**{suffix}")
+    if kind == "urgent" and remaining:
+        items.append(f"- 🚨 **{remaining}，抓紧领取！**")
+    meta = game.get("_egdata") or {}
+    tags = meta.get("tags") or []
+    genre = _epic_genre_text(tags)
+    if genre:
+        items.append(f"- 🏷️ 类型：{genre}")
+    online = _epic_online_text(tags)
+    if online:
+        items.append(f"- 👥 联机：{online}")
+    rating = _epic_rating_text(meta.get("rating"))
+    if rating:
+        items.append(f"- ⭐ {rating}")
+    link = str(game.get("link") or "").strip()
+    if link:
+        items.append(f"- 🔗 [{link_text}]({link})")
+    return [[f"### ⚠️ {title}" if kind == "urgent" else f"### {title}"], items]
 
 
 def _fmt_usage(usage):

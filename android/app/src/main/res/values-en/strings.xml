@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HeyChat Monitor</string>
+
+    <string name="ok">OK</string>
+    <string name="cancel">Cancel</string>
+    <string name="save">Save</string>
+    <string name="close">Close</string>
+    <string name="retry">Retry</string>
+    <string name="refresh">Refresh</string>
+    <string name="loading">Loading…</string>
+    <string name="search">Search</string>
+    <string name="back">Back</string>
+    <string name="clear">Clear</string>
+    <string name="unknown_user">Unknown user</string>
+
+    <string name="login_title">Sign in to server</string>
+    <string name="login_server_ip">Server IP</string>
+    <string name="login_secret">Secret key</string>
+    <string name="login_server_hint">e.g. 192.168.1.20:8080</string>
+    <string name="login_secret_hint">Panel access password</string>
+    <string name="login_invalid_server">Enter a valid server address (IP or IP:port)</string>
+    <string name="login_empty_secret">Enter the secret key</string>
+    <string name="login_action">Sign in</string>
+    <string name="login_connecting">Verifying…</string>
+    <string name="login_success">Signed in</string>
+    <string name="error_prefix">ERROR: %1$s</string>
+    <string name="error_network">Cannot reach the server. Check the address and network.</string>
+    <string name="error_unauthorized">Wrong secret key</string>
+    <string name="error_locked">Too many attempts, try again later</string>
+    <string name="error_http">Server returned an error (%1$d)</string>
+    <string name="error_parse">Unexpected response format</string>
+    <string name="error_generic">Operation failed</string>
+    <string name="show_password">Show password</string>
+    <string name="hide_password">Hide password</string>
+
+    <string name="nav_room">Room</string>
+    <string name="nav_live">Live</string>
+    <string name="nav_history">Records</string>
+    <string name="nav_settings">Settings</string>
+
+    <string name="room_card_title">%1$s</string>
+    <string name="room_not_monitored_channel">%1$s channels monitored</string>
+    <string name="room_online_now">%1$d online now</string>
+    <string name="room_avatar_desc">Room avatar</string>
+    <string name="room_no_intro">No room description</string>
+    <string name="room_load_failed">Could not load room info</string>
+    <string name="room_id_label">Room ID: %1$s</string>
+
+    <string name="bot_status_title">Bot status</string>
+    <string name="bot_status_running">Running for %1$s since start</string>
+    <string name="bot_status_normal">Healthy</string>
+    <string name="bot_status_degraded">Some channels failing</string>
+    <string name="bot_status_stopped">Polling stopped</string>
+    <string name="bot_ws_connected">Command link connected</string>
+    <string name="bot_ws_disconnected">Command link disconnected</string>
+    <string name="bot_ws_disabled">Command feature off</string>
+    <string name="bot_last_poll">Last poll %1$s</string>
+    <string name="bot_poll_interval">Poll every %1$d s</string>
+    <string name="bot_error_count">%1$d channels failing</string>
+    <string name="bot_error_detail">Channel %1$s: %2$s</string>
+    <string name="uptime_format">%1$dd %2$dh %3$dm</string>
+
+    <string name="live_title">Channel live</string>
+    <string name="live_channel_headcount">%1$d online</string>
+    <string name="live_empty_channel">Nobody in this channel</string>
+    <string name="live_since">Joined %1$s</string>
+    <string name="live_current_duration">Online %1$s</string>
+    <string name="live_no_data">No live data yet, waiting for the next poll</string>
+    <string name="live_last_update">Updated %1$s</string>
+    <string name="live_recent_left_title">Recently left</string>
+    <string name="live_ago">Left %1$s ago</string>
+
+    <string name="member_actions_title">Member actions</string>
+    <string name="member_user_id">UID %1$s</string>
+    <string name="member_send_mention">Mention them</string>
+    <string name="member_mention_hint">Mention message</string>
+    <string name="member_mention_sent">Mentioned in channel</string>
+    <string name="member_roles_title">Roles</string>
+    <string name="member_roles_empty">No roles in this room</string>
+    <string name="member_role_grant">Grant</string>
+    <string name="member_role_revoke">Revoke</string>
+    <string name="member_role_granted">Granted “%1$s”</string>
+    <string name="member_role_revoked">Revoked “%1$s”</string>
+    <string name="member_view_history">View their records</string>
+    <string name="unsupported_hint">The bot API does not support this action</string>
+
+    <string name="history_title">Online records</string>
+    <string name="history_filter_user">Filter by user / UID</string>
+    <string name="history_filter_channel">All channels</string>
+    <string name="history_filter_date">All dates</string>
+    <string name="history_join">Joined %1$s</string>
+    <string name="history_leave">Left %1$s</string>
+    <string name="history_ongoing">Ongoing</string>
+    <string name="history_duration">Online %1$s</string>
+    <string name="history_empty">No matching records</string>
+    <string name="history_total">%1$d records</string>
+    <string name="history_summary">Total online time</string>
+    <string name="history_sessions">%1$d sessions</string>
+    <string name="history_archived">Archived</string>
+    <string name="history_edit">Edit</string>
+    <string name="history_delete">Delete</string>
+    <string name="history_edit_title">Fix join / leave time</string>
+    <string name="history_edit_join">Join time</string>
+    <string name="history_edit_leave">Leave time</string>
+    <string name="history_edit_hint">Format 2026-09-06 14:30, leave blank for unknown</string>
+    <string name="history_delete_title">Delete this record?</string>
+    <string name="history_delete_body">This cannot be undone and will change the online-time totals.</string>
+    <string name="history_deleted">Record deleted</string>
+    <string name="history_updated">Record updated</string>
+    <string name="edit_password_title">Enter edit password</string>
+    <string name="edit_password_body">Editing and deleting records need the separate edit_password from config.json.</string>
+    <string name="edit_password_label">Edit password</string>
+    <string name="edit_password_disabled">No edit password on the server, record editing is disabled</string>
+    <string name="load_more">Load more</string>
+
+    <string name="send_title">Send channel message</string>
+    <string name="send_channel">Target channel</string>
+    <string name="send_content">Message</string>
+    <string name="send_content_hint">Markdown supported, up to 2000 characters</string>
+    <string name="send_action">Send</string>
+    <string name="send_success">Message sent</string>
+    <string name="send_empty">Enter a message first</string>
+    <string name="send_no_channel">No channel available</string>
+    <string name="send_entry">Send channel message</string>
+
+    <string name="settings_title">Settings</string>
+    <string name="settings_app_group">App settings</string>
+    <string name="settings_bot_group">Bot settings</string>
+    <string name="settings_language">Language</string>
+    <string name="settings_language_desc">Interface language</string>
+    <string name="settings_language_zh">简体中文</string>
+    <string name="settings_language_en">English</string>
+    <string name="settings_theme">Appearance</string>
+    <string name="settings_theme_desc">Only light mode ships in this build</string>
+    <string name="settings_theme_light">Light</string>
+    <string name="settings_theme_system">System default</string>
+    <string name="settings_server_group">Server</string>
+    <string name="settings_server_address">Server address</string>
+    <string name="settings_logout">Sign out</string>
+    <string name="settings_logout_desc">Clear the saved session and secret key</string>
+    <string name="settings_logout_title">Sign out?</string>
+    <string name="settings_logout_body">The session token and secret key stored on this device will be cleared.</string>
+    <string name="settings_logged_out">Signed out</string>
+    <string name="settings_about">About</string>
+    <string name="settings_version">Version %1$s</string>
+
+    <string name="cfg_poll_interval">Poll interval</string>
+    <string name="cfg_poll_interval_desc">1–3600 seconds, applies immediately</string>
+    <string name="cfg_bot_enabled">Slash-command bot</string>
+    <string name="cfg_bot_enabled_desc">/fortune /pick /init /help</string>
+    <string name="cfg_record_initial">Record users already online at startup</string>
+    <string name="cfg_record_initial_desc">Logs leave time only, no duration</string>
+    <string name="cfg_channels">Monitored channels</string>
+    <string name="cfg_channels_desc">Pick the voice channels to track</string>
+    <string name="cfg_channels_changed">Saved monitored channels (%1$d)</string>
+    <string name="cfg_epic_channel">Epic push channel</string>
+    <string name="cfg_epic_channel_desc">Leave empty to disable pushes</string>
+    <string name="cfg_epic_times">Epic push times</string>
+    <string name="cfg_epic_times_desc">HH:MM values separated by commas</string>
+    <string name="cfg_edit_password">Edit password</string>
+    <string name="cfg_edit_password_desc">Guards record editing, roles and config writes</string>
+    <string name="cfg_edit_password_set">Set</string>
+    <string name="cfg_edit_password_unset">Not set (related features disabled)</string>
+    <string name="cfg_room_id">Room ID</string>
+    <string name="cfg_bot_id">Bot ID</string>
+    <string name="cfg_token">Bot token</string>
+    <string name="cfg_web_port">Panel port</string>
+    <string name="cfg_saved">Config saved</string>
+    <string name="cfg_restart_needed">Some changes need the bot process to restart: %1$s</string>
+    <string name="cfg_invalid_number">Enter a whole number between 1 and 3600</string>
+    <string name="cfg_no_channels">Room channel list is not loaded yet</string>
+    <string name="settings_save_failed">Save failed</string>
+
+    <!-- Login -->
+    <string name="login_hint">Enter the address of the server running the panel and its access secret</string>
+
+    <!-- Room card -->
+    <string name="room_click_hint">Tap the card to reload room info</string>
+    <string name="bot_online_now">Online now</string>
+    <string name="bot_poll_interval_value">%1$d s per poll</string>
+    <string name="bot_command_channel">Command connection</string>
+
+    <!-- Live channels -->
+    <string name="live_empty_hint">Members appear after the bot completes a poll</string>
+    <string name="live_channel_monitored">%1$d online · tracked</string>
+    <string name="member_channel">Channel</string>
+    <string name="member_join_time">Joined at</string>
+    <string name="member_online_now">This session</string>
+    <string name="member_unsupported_note">The platform bot API only grants/revokes roles and sends channel messages. Mute, kick and DM are not available.</string>
+
+    <!-- History -->
+    <string name="history_empty_hint">Adjust the filters, or wait for the next poll to record sessions</string>
+    <string name="history_retention_note">Records older than 3 days are archived and still count towards totals.</string>
+    <string name="history_include_archived">Include archived records</string>
+    <string name="history_date_hint">Format 2026-09-06</string>
+    <string name="history_invalid_date">Date must look like 2026-09-06</string>
+    <string name="history_date_today">Use today</string>
+    <string name="history_edit_requires_password">Saving needs the separate edit password from config.json</string>
+    <string name="history_invalid_time">Time must look like 2026-09-06 14:30</string>
+
+    <!-- Send message -->
+    <string name="send_mentioning">@ %1$s</string>
+    <string name="send_counter">%1$d / %2$d</string>
+    <string name="send_too_long">Over the %2$d character limit (%1$d now)</string>
+
+    <!-- Settings and bot config -->
+    <string name="settings_language_system">System default</string>
+    <string name="settings_capability_note">The app uses the same backend API as the web panel; data is live.</string>
+    <string name="cfg_monitor_group">Monitoring</string>
+    <string name="cfg_push_group">Push</string>
+    <string name="cfg_credentials_group">Identity and credentials</string>
+    <string name="cfg_admins">Command admin UIDs</string>
+    <string name="cfg_admins_desc">Comma separated; only these accounts may use slash commands</string>
+    <string name="cfg_epic_channel_none">No push</string>
+    <string name="cfg_epic_times_invalid">Use HH:MM values separated by commas</string>
+    <string name="cfg_id_restart_note">Changes apply after the bot process restarts</string>
+    <string name="cfg_web_port_desc">Panel HTTP port, applies after restart</string>
+    <string name="cfg_token_desc">Leave empty to keep unchanged, currently %1$s</string>
+    <string name="cfg_web_password_note">The panel login secret can only be changed in config.json on the server.</string>
+    <string name="cfg_reset">Discard changes</string>
+    <string name="cfg_no_change">Nothing to save</string>
+    <string name="edit_password_required">This action needs the edit password, enter it and try again</string>
+</resources>

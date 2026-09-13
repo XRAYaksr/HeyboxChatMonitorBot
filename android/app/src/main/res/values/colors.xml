@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 图标使用设计稿的 primary 蓝色，与应用内主题角色取值一致 -->
+    <color name="ic_launcher_background">#0B57D0</color>
+</resources>
