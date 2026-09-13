@@ -45,14 +45,14 @@ COMMON_PARAMS = {
 }
 
 HEARTBEAT_INTERVAL_SECONDS = 30
-EPIC_CHECK_INTERVAL_SECONDS = 20
+EPIC_CHECK_INTERVAL_SECONDS = 60
 RECONNECT_MAX_DELAY_SECONDS = 60
 EVENT_COMMAND_TYPE = "50"
 EVENT_MESSAGE_TYPE = "5"
 MSG_TYPE_MD = 4
 MSG_TYPE_MD_AT = 10
 ROOM_USER_PAGE_LIMIT = 300
-DEFAULT_EPIC_PUSH_TIMES = ["12:00"]
+DEFAULT_EPIC_PUSH_TIMES = ["00:00"]
 EPIC_ENDING_SOON_HOURS = 24
 EGDATA_TIMEOUT_SECONDS = 15
 EPIC_RATING_CACHE_DAYS = 7
@@ -211,7 +211,7 @@ def parse_push_times(raw):
                 times.append((hour, minute))
         except ValueError:
             continue
-    return times or [(12, 0)]
+    return times or [(0, 0)]
 
 
 class CommandContext:
@@ -1160,22 +1160,25 @@ class ChatBot:
             try:
                 self._epic_tick()
             except Exception as exc:
-                print(f"[bot] Epic 定时推送失败：{exc}")
+                print(f"[bot] Epic 定时推送失败：{exc}"
+                      f"（该时间点今天不再重试，可用 /forcepushepic 手动推送）")
 
     def _epic_tick(self):
         if not self.epic_push_channel_id:
             return
         now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
         for hour, minute in self.epic_push_times:
             slot_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if now < slot_time:
                 continue
             key = f"bot:epic:last_push:{hour:02d}:{minute:02d}"
             last = self.store.get_json(key) or {}
-            if last.get("date") == now.strftime("%Y-%m-%d"):
+            if last.get("date") == today:
                 continue
+            # 请求前就先登记当天，失败时不再周期性重试，避免持续打接口触发 429
+            self.store.set_json(key, {"date": today})
             titles = self.push_epic_to_channel()
-            self.store.set_json(key, {"date": now.strftime("%Y-%m-%d")})
             print(f"[bot] Epic 免费游戏已定时推送：{titles}")
             break  # 一个轮询周期只推一次
 
@@ -1187,27 +1190,6 @@ def _to_ms(value):
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _price_text(game):
-    desc = str(game.get("original_price_desc") or "").strip()
-    if desc:
-        return desc
-    price = game.get("original_price")
-    return f"¥{price}" if price not in (None, "") else "未知"
-
-
-def _remaining_text(end_ms, now):
-    if not end_ms:
-        return ""
-    seconds = end_ms / 1000 - now.timestamp()
-    if seconds <= 0:
-        return "已结束"
-    days, rem = divmod(int(seconds), 86400)
-    hours, _ = divmod(rem, 3600)
-    if days:
-        return f"还剩{days}天{hours}小时"
-    return f"还剩{hours}小时"
 
 
 def _safe_offer_id(value):
@@ -1252,6 +1234,27 @@ def _epic_rating_text(rating):
     if rating.get("recommend") is not None:
         parts.append(f"推荐率 {rating['recommend']}%")
     return "、".join(parts)
+
+
+def _price_text(game):
+    desc = str(game.get("original_price_desc") or "").strip()
+    if desc:
+        return desc
+    price = game.get("original_price")
+    return f"¥{price}" if price not in (None, "") else "未知"
+
+
+def _remaining_text(end_ms, now):
+    if not end_ms:
+        return ""
+    seconds = end_ms / 1000 - now.timestamp()
+    if seconds <= 0:
+        return "已结束"
+    days, rem = divmod(int(seconds), 86400)
+    hours, _ = divmod(rem, 3600)
+    if days:
+        return f"还剩{days}天{hours}小时"
+    return f"还剩{hours}小时"
 
 
 def _epic_game_block(game, now, kind):
