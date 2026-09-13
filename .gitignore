@@ -14,3 +14,14 @@ voice_monitor.db
 
 # setup.py 调试输出
 room_view_debug.json
+
+# Android / Gradle 构建产物
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# 签名材料（keystore 与口令一律不入库）
+android/keystore.properties
+*.keystore
+*.jks

@@ -131,6 +131,49 @@ python main.py
 - 编辑接口（`/api/edit`）与删除接口（`/api/delete`）在会话之外还要求独立的 `edit_password`（SHA-256 哈希比对，共用失败锁定），且密码不出现在代码与仓库中
 - 未设置 `web_password` 时程序直接退出，杜绝无密码暴露
 
+## Android 客户端（`android/`）
+
+Jetpack Compose（Material 3）原生客户端，连的就是上面这套面板接口。
+
+- **登录**：填面板地址与访问密码，用 `POST /api/login` 换取会话令牌；令牌存在本机 DataStore，重启后自动复登，失效则回到登录页
+- **首页**：房间头像/简介/频道概况 + 机器人运行状态（运行时长、当前在线、上次轮询时间、命令通道连接状态、各频道错误）
+- **频道实况**：按语音频道分组的当前在线成员，点成员打开详情——本次在线时长、身份组勾选、@ 提及与发频道消息
+- **历史记录**：跨主表与归档表查询，支持 UID/昵称/频道/日期筛选与分页加载，汇总每人累计时长；可编辑上下线时间、删除记录（均需编辑密码）
+- **设置**：APP 侧（语言、深浅色、登出、服务器与房间信息）+ 机器人侧配置（轮询间隔、监控频道、Epic 推送频道与时间、管理员、房间/机器人 ID、面板端口、token、编辑密码），只提交改动项，需要重启进程才生效的字段会单独提示
+
+平台机器人接口没有踢出、禁言、私聊能力，客户端不做伪装实现，成员卡片与设置页只说明实际可用的操作。房间、在线、历史、配置全部来自服务端，接口失败或无数据时显示空状态与错误原因，不含任何示例数据。
+
+### 构建签名的 release APK
+
+```bash
+cd android
+# keystore.properties 不入库，字段：storeFile / storePassword / keyAlias / keyPassword
+JAVA_HOME=<JDK 21> gradle :app:assembleRelease
+# 产物：android/app/build/outputs/apk/release/app-release.apk
+```
+
+compileSdk/targetSdk 36、minSdk 26，release 开启 R8 与资源压缩；没有 `keystore.properties` 时构建仍通过，但产物未签名。
+
+### App 使用的 JSON 接口
+
+鉴权分两层：会话令牌（`X-Session-Token` 头或登录 Cookie）保护全部读写；改身份组、改配置、编辑/删除记录额外要求在 JSON body 里带 `password`（即 `edit_password`），失败计数与网页面板共用同一把锁。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| POST | `/api/login` | — | `{password}` → `{ok, token, ttl_seconds}`，供 App 免 Cookie 使用 |
+| POST | `/api/logout` | 会话 | 注销当前令牌 |
+| GET | `/api/session` | 会话 | 令牌有效时直接返回运行状态，用于启动复登 |
+| GET | `/api/status` | 会话 | 运行状态、在线人数、轮询间隔、命令通道连接、各频道错误 |
+| GET | `/api/room` | 会话 | 房间头像/简介/语音频道列表，带缓存与 `warning` |
+| GET | `/api/roles?user_id=` | 会话 | 房间身份组列表；带 `user_id` 时附该用户的身份组 |
+| GET | `/api/history?user=&channel=&date=&limit=&offset=&archived=` | 会话 | 分页进出记录 + 每人累计时长；`user` 传昵称时服务端先解析成 UID 集合再查库 |
+| GET | `/api/config` | 会话 | 脱敏配置（token 只返回掩码） |
+| POST | `/api/send` | 会话 | `{channel_id, msg, at_user_id?, msg_type?}`，markdown，带 @ 时自动用支持 @ 的消息类型 |
+| POST | `/api/role` | 会话 + 编辑密码 | `{action: grant\|revoke, user_id, role_id, password}` |
+| POST | `/api/config` | 会话 + 编辑密码 | `{config: {仅改动项}, password}`，返回已应用项与需重启提示 |
+| POST | `/api/edit` | 会话 + 编辑密码 | `{id, join_time, leave_time, password}`，时长自动重算 |
+| POST | `/api/delete` | 会话 + 编辑密码 | `{id, password}` |
+
 ## 命令行报表（report.py）
 
 ```bash

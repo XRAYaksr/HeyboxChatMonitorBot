@@ -164,34 +164,39 @@ class BotStore:
             self.conn.close()
 
 
-def walk_channels(value, found=None, seen=None):
-    """递归扫描 room/view 的 result，收集所有带 channel_id 的对象（与 setup.py 一致）。"""
+CHANNEL_TYPE_VOICE = 0
+CHANNEL_TYPE_CATEGORY = 3
+
+
+def collect_channels(nodes, found=None):
+    """按 room/view 的 channel_list 层级收集真实频道。
+
+    分区（channel_type=3）只是分组标题，`channel_id` 为 "0" 的对象来自房间配置，
+    两者都不是可收发消息的频道，跳过但仍继续下钻。
+    """
     if found is None:
-        found, seen = [], set()
-    if isinstance(value, dict):
-        channel_id = value.get("channel_id")
-        if channel_id is not None:
-            cid = str(channel_id)
-            if cid not in seen:
-                seen.add(cid)
-                found.append(value)
-        for child in value.values():
-            walk_channels(child, found, seen)
-    elif isinstance(value, list):
-        for child in value:
-            walk_channels(child, found, seen)
+        found = []
+    for channel in nodes or []:
+        if not isinstance(channel, dict):
+            continue
+        channel_id = str(channel.get("channel_id") or "").strip()
+        channel_type = to_channel_type(channel.get("channel_type"))
+        if channel_id and channel_id != "0" and channel_type != CHANNEL_TYPE_CATEGORY:
+            found.append(channel)
+        collect_channels(channel.get("channel_list"), found)
     return found
 
 
+def to_channel_type(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def looks_like_voice_channel(channel):
-    """判断是否语音频道：文字频道 channel_type=1；语音频道带 rtc 类 api_type 或其他类型。"""
-    channel_type = channel.get("channel_type")
-    api_type = str(channel.get("api_type") or "").lower()
-    if api_type in ("trtc", "volc", "rtc"):
-        return True
-    if channel_type == 1:
-        return False
-    return channel_type not in (None, 0)
+    """语音频道 channel_type=0；1=文字、2=公告、3=分区。api_type 所有频道都有，不能用来判定。"""
+    return to_channel_type(channel.get("channel_type")) == CHANNEL_TYPE_VOICE
 
 
 def parse_push_times(raw):
@@ -289,6 +294,10 @@ class ChatBot:
         self._aliases_lock = threading.Lock()
 
     # ------------------------------------------------------------------ 启动
+
+    def is_connected(self):
+        """WebSocket 当前是否处于连接状态（用于面板/App 展示运行健康度）。"""
+        return self.enabled and self.ws is not None
 
     def start_background(self):
         if not self.enabled:
@@ -607,9 +616,9 @@ class ChatBot:
         return online
 
     def get_room_channels(self):
-        """房间全部频道（递归扫描 room/view）。"""
+        """房间全部频道（按 room/view 的频道层级展开，不含分区）。"""
         result = self._api_get("/chatroom/v2/room/view", {"room_id": self.room_id})
-        return walk_channels(result)
+        return collect_channels((result.get("room_info") or {}).get("channels"))
 
     def get_room_members(self):
         """房间全部成员（分页）。"""
@@ -628,6 +637,69 @@ class ChatBot:
             if len(page) < ROOM_USER_PAGE_LIMIT:
                 break
         return [m for m in members if isinstance(m, dict)]
+
+    # ------------------------------------------------------------ 身份组管理
+
+    def list_roles(self):
+        """房间身份组列表，规范化为 [{id, name}]。"""
+        result = self._api_get("/chatroom/v2/room_role/roles", {"room_id": self.room_id})
+        roles = result.get("roles") if isinstance(result, dict) else result
+        normalized = []
+        for role in roles or []:
+            if not isinstance(role, dict):
+                continue
+            rid = str(role.get("id") or role.get("role_id") or "").strip()
+            if not rid:
+                continue
+            normalized.append({
+                "id": rid,
+                "name": str(role.get("name") or role.get("role_name") or "").strip() or rid,
+                "color": str(role.get("color") or role.get("role_color") or "").strip(),
+            })
+        return normalized
+
+    def roles_of(self, user_id):
+        """成员当前持有的身份组 ID 集合。房间用户列表里带 role_ids 时可用。"""
+        user_id = str(user_id)
+        for member in self.get_room_members():
+            if str(member.get("user_id") or "") != user_id:
+                continue
+            raw = member.get("role_ids") or member.get("roles") or []
+            if isinstance(raw, str):
+                raw = [x for x in raw.split(",") if x.strip()]
+            out = set()
+            for item in raw:
+                rid = str(item.get("id") or item.get("role_id") or item).strip() \
+                    if isinstance(item, dict) else str(item).strip()
+                if rid:
+                    out.add(rid)
+            return out
+        return set()
+
+    def grant_role(self, user_id, role_id):
+        return self._role_request("/chatroom/v2/room_role/grant", user_id, role_id, "授予身份组")
+
+    def revoke_role(self, user_id, role_id):
+        return self._role_request("/chatroom/v2/room_role/revoke", user_id, role_id, "撤销身份组")
+
+    def _role_request(self, path, user_id, role_id, action):
+        body = {
+            "to_user_id": int(user_id),
+            "role_id": str(role_id),
+            "room_id": str(self.room_id),
+        }
+        response = requests.post(
+            BASE_URL + path,
+            params=COMMON_PARAMS,
+            headers={"token": self.token, "Content-Type": "application/json;charset=UTF-8"},
+            json=body,
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("status") != "ok":
+            raise RuntimeError(f"{action}失败：" + json.dumps(payload, ensure_ascii=False))
+        return payload
 
     # ------------------------------------------------------ 频道编号与管理员
 

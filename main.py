@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -13,7 +14,10 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from chat_bot import ChatBot
+from chat_bot import (
+    ChatBot, MSG_TYPE_MD, MSG_TYPE_MD_AT, collect_channels,
+    looks_like_voice_channel, parse_push_times,
+)
 
 BASE_URL = "https://chat.xiaoheihe.cn"
 CONFIG_FILE = Path("config.json")
@@ -187,6 +191,18 @@ class NicknameCache:
                 threading.Thread(target=self.refresh_all, daemon=True).start()
             return {"name": entry["name"], "avatar": entry["avatar"]}
 
+    def search(self, term, limit=400):
+        """昵称/UID 模糊匹配缓存，返回 UID 列表；昵称无法直接进 SQL，需先解析成人。"""
+        term = str(term).strip().lower()
+        if not term:
+            return []
+        with self.lock:
+            matched = [
+                uid for uid, entry in self.entries.items()
+                if term in str(entry["name"]).lower() or term in uid
+            ]
+        return sorted(matched)[:limit]
+
     def display(self, user_id):
         info = self.lookup(user_id)
         return info["name"] or user_id
@@ -255,7 +271,10 @@ class EditGuard:
     def __init__(self, config):
         self.lock = threading.RLock()
         self.failures = []
-        password = str(config.get("edit_password", "")).strip()
+        self.set_password(str(config.get("edit_password", "")).strip())
+
+    def set_password(self, password):
+        """更新编辑密码哈希；保留失败计数窗口，避免改密绕过锁定。"""
         self.enabled = bool(password)
         self.password_hash = hashlib.sha256(password.encode("utf-8")).hexdigest() if password else None
 
@@ -431,6 +450,9 @@ class Monitor:
         self.last_archive_run = None
         self.nicknames = nicknames
         self.web_port = WEB_PORT
+        self.started_at = datetime.now()
+        self.poll_count = 0
+        self.edit_enabled = False
 
     def display_user(self, user_id):
         if self.nicknames is None:
@@ -604,6 +626,7 @@ class Monitor:
 
     def check_once(self):
         current_time = datetime.now()
+        self.poll_count += 1
         for channel_id in self.channel_ids:
             try:
                 current = get_user_ids(self.config, channel_id)
@@ -932,10 +955,348 @@ __ERROR__
 </body></html>"""
 
 
+ROOM_VIEW_TTL_SECONDS = 300
+
+
+def pick_first(source, keys):
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def to_int_or_none(value):
+    """平台可能把数字字段发成字符串；统一成 int 或 None，便于客户端按类型解析。"""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+class RoomCache:
+    """缓存房间视图（room/view），供 App 展示房间名称、头像、简介与频道列表。"""
+
+    def __init__(self, config):
+        self.config = config
+        self.lock = threading.RLock()
+        self.data = None
+        self.fetched_at = None
+        self.error = None
+
+    @property
+    def room_id(self):
+        return str(self.config.get("room_id", "")).strip()
+
+    def _fetch(self):
+        headers = {"token": self.config["token"]}
+        params = dict(COMMON_PARAMS)
+        params.update({"room_id": self.room_id, "heybox_id": str(self.config["heybox_id"])})
+        response = requests.get(
+            BASE_URL + "/chatroom/v2/room/view",
+            params=params, headers=headers, timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("status") != "ok":
+            raise RuntimeError("API返回错误：" + json.dumps(payload, ensure_ascii=False))
+        result = payload.get("result") or {}
+
+        room_info = result.get("room_info") if isinstance(result.get("room_info"), dict) else result
+        detail = room_info.get("room") if isinstance(room_info.get("room"), dict) else room_info
+        name = pick_first(detail, ("room_name", "name", "title", "room_title"))
+        avatar = pick_first(detail, (
+            "room_avatar", "avatar", "icon", "head_url", "room_icon", "cover", "background_img",
+        ))
+        intro = pick_first(detail, (
+            "introduction", "room_intro", "intro", "notice", "description", "room_desc", "desc",
+        ))
+
+        monitored = {str(x) for x in self.config.get("channel_ids", [])}
+        channels, seen = [], set()
+        for channel in collect_channels(room_info.get("channels")):
+            cid = str(channel.get("channel_id") or "").strip()
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            channels.append({
+                "channel_id": cid,
+                "channel_name": str(channel.get("channel_name") or channel.get("name") or "").strip(),
+                "channel_type": to_int_or_none(channel.get("channel_type")),
+                "api_type": str(channel.get("api_type") or ""),
+                "is_voice": bool(looks_like_voice_channel(channel)),
+                "monitored": cid in monitored,
+            })
+        for cid in sorted(monitored - seen):
+            channels.append({
+                "channel_id": cid, "channel_name": "", "channel_type": None, "api_type": "",
+                "is_voice": True, "monitored": True,
+            })
+        return {
+            "room_id": self.room_id,
+            "room_name": name,
+            "room_avatar": avatar,
+            "room_intro": intro,
+            "channels": channels,
+        }
+
+    def get(self, force=False):
+        with self.lock:
+            fresh = (
+                self.data is not None and self.fetched_at is not None
+                and datetime.now() - self.fetched_at < timedelta(seconds=ROOM_VIEW_TTL_SECONDS)
+            )
+            if fresh and not force:
+                return self.data, self.error
+            try:
+                self.data = self._fetch()
+                self.fetched_at = datetime.now()
+                self.error = None
+            except Exception as exc:
+                self.error = str(exc)
+                print(f"获取房间信息失败：{exc}")
+            return self.data, self.error
+
+
+def uptime_text(seconds):
+    if seconds is None or seconds < 0:
+        return "-"
+    days, rem = divmod(int(seconds), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    return f"{days}天{hours}时{minutes}分"
+
+
+def build_status(monitor, bot):
+    """机器人运行状态：供 App 首页与登录后的会话校验共用。"""
+    now = datetime.now()
+    seconds = int((now - monitor.started_at).total_seconds())
+    errors = dict(monitor.last_errors)
+    healthy = monitor.last_update is not None and \
+        (now - monitor.last_update).total_seconds() <= max(monitor.interval * 3, 30)
+    return {
+        "running": healthy,
+        "uptime_seconds": seconds,
+        "uptime_text": uptime_text(seconds),
+        "started_at": fmt(monitor.started_at),
+        "last_update": fmt(monitor.last_update) if monitor.last_update else None,
+        "poll_interval": monitor.interval,
+        "poll_count": monitor.poll_count,
+        "channels": list(monitor.channel_ids),
+        "channel_errors": errors,
+        "online_count": sum(len(users) for users in monitor.online.values()),
+        "bot_enabled": bool(bot and bot.enabled),
+        "bot_connected": bool(bot and bot.is_connected()),
+        "edit_enabled": bool(monitor.edit_enabled),
+    }
+
+
+HISTORY_TABLES = ("voice_sessions", "voice_sessions_archive")
+
+
+def query_history(conn, user_filter="", channel_filter="", date_filter="",
+                  limit=100, offset=0, include_archived=True, user_ids=None):
+    """跨主表与归档表查询进出记录，并汇总每位用户的在线时长。
+
+    user_ids 用于「按昵称搜索」：昵称只存在于内存缓存，先解析成 UID 集合再查库，
+    空集合表示没有任何命中，必须查不到记录。
+    """
+    limit = max(1, min(int(limit or 100), 500))
+    offset = max(0, int(offset or 0))
+    tables = list(HISTORY_TABLES) if include_archived else [HISTORY_TABLES[0]]
+    union_sql = " UNION ALL ".join(
+        f"SELECT id, user_id, channel_id, join_time, leave_time, duration_seconds, "
+        f"{'0' if i == 0 else '1'} AS archived FROM {table}"
+        for i, table in enumerate(tables)
+    )
+    where, params = [], []
+    if channel_filter:
+        where.append("channel_id = ?")
+        params.append(str(channel_filter))
+    if user_filter:
+        where.append("user_id LIKE ?")
+        params.append(f"%{user_filter}%")
+    if user_ids is not None:
+        ids = [str(uid) for uid in user_ids]
+        if ids:
+            where.append("user_id IN (%s)" % ",".join(["?"] * len(ids)))
+            params.extend(ids)
+        else:
+            where.append("1 = 0")
+    if date_filter:
+        where.append("substr(COALESCE(leave_time, join_time), 1, 10) = ?")
+        params.append(str(date_filter))
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    rows = conn.execute(
+        f"SELECT * FROM ({union_sql}){where_sql} "
+        "ORDER BY COALESCE(leave_time, join_time) DESC LIMIT ? OFFSET ?",
+        params + [limit, offset],
+    ).fetchall()
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM ({union_sql}){where_sql}", params
+    ).fetchone()[0]
+
+    items = []
+    for r in rows:
+        items.append({
+            "id": r[0], "user_id": r[1], "channel_id": r[2],
+            "join_time": r[3], "leave_time": r[4],
+            "duration_seconds": r[5], "duration": duration_text(r[5]),
+            "archived": bool(r[6]),
+            "open": r[4] is None,
+        })
+
+    summary_rows = conn.execute(
+        f"SELECT user_id, COUNT(*), SUM(COALESCE(duration_seconds, 0)) "
+        f"FROM ({union_sql}){where_sql} GROUP BY user_id", params
+    ).fetchall()
+    summary = sorted(
+        ({"user_id": r[0], "sessions": r[1], "total_seconds": r[2] or 0,
+          "total_text": duration_text(r[2] or 0)} for r in summary_rows),
+        key=lambda x: x["total_seconds"], reverse=True,
+    )
+    return {"items": items, "total": total, "limit": limit, "offset": offset, "summary": summary}
+
+
+SEND_MSG_MAX_LENGTH = 2000
+
+# JSON 请求体大小上限，避免无节制的内存占用
+MAX_JSON_BODY_BYTES = 64 * 1024
+
+PUSH_TIME_PATTERN = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+
+CONFIG_INT_RANGES = {
+    "poll_interval": (1, 3600),
+    "web_port": (1, 65535),
+}
+CONFIG_BOOL_FIELDS = ("record_initial_online", "bot_enabled")
+CONFIG_STR_FIELDS = ("token", "heybox_id", "room_id", "epic_push_channel_id",
+                     "edit_password", "web_password")
+CONFIG_ID_LIST_FIELDS = ("channel_ids", "admins")
+# 这些字段只在启动时读取一次，改完必须重启进程才生效。
+RESTART_REQUIRED_FIELDS = {"token", "heybox_id", "room_id", "web_port"}
+
+
+def coerce_config_value(key, raw):
+    """按字段类型校验并规范化配置值，非法时抛 ValueError。"""
+    if key in CONFIG_INT_RANGES:
+        low, high = CONFIG_INT_RANGES[key]
+        try:
+            value = int(str(raw).strip())
+        except (ValueError, TypeError):
+            raise ValueError(f"{key} 需要是整数")
+        if not low <= value <= high:
+            raise ValueError(f"{key} 需要在 {low}~{high} 之间")
+        return value
+    if key in CONFIG_BOOL_FIELDS:
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off", ""):
+            return False
+        raise ValueError(f"{key} 需要是布尔值")
+    if key in CONFIG_ID_LIST_FIELDS:
+        items = raw if isinstance(raw, list) else str(raw).replace("\n", ",").split(",")
+        cleaned = [str(x).strip() for x in items if str(x).strip()]
+        if key == "channel_ids" and not cleaned:
+            raise ValueError("至少需要选择一个监控频道")
+        seen, ordered = set(), []
+        for item in cleaned:
+            if item not in seen:
+                seen.add(item)
+                ordered.append(item)
+        return ordered
+    if key == "epic_push_times":
+        items = raw if isinstance(raw, list) else str(raw).replace("\n", ",").split(",")
+        cleaned = [str(x).strip() for x in items if str(x).strip()]
+        for item in cleaned:
+            # 不用 parse_push_times 校验：它在无合法项时会兜底成 12:00
+            if not PUSH_TIME_PATTERN.match(item):
+                raise ValueError(f"推送时间格式错误：{item}（应为 HH:MM，时 0-23、分 0-59）")
+        return cleaned
+    if key in CONFIG_STR_FIELDS:
+        return str(raw).strip()
+    raise ValueError(f"不支持修改的配置项：{key}")
+
+
+def mask_secret(value):
+    value = str(value or "")
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return value[:4] + "*" * (len(value) - 8) + value[-4:]
+
+
+def public_config(config):
+    """App 可见的配置视图：密钥只做掩码，密码只暴露是否已设置。"""
+    return {
+        "token_masked": mask_secret(config.get("token")),
+        "has_token": bool(str(config.get("token", "")).strip()),
+        "heybox_id": str(config.get("heybox_id", "")),
+        "room_id": str(config.get("room_id", "")),
+        "channel_ids": [str(x) for x in config.get("channel_ids", [])],
+        "poll_interval": int(config.get("poll_interval", 5)),
+        "record_initial_online": bool(config.get("record_initial_online", False)),
+        "web_port": int(config.get("web_port", WEB_PORT)),
+        "bot_enabled": bool(config.get("bot_enabled", True)),
+        "admins": [str(x) for x in config.get("admins", [])],
+        "epic_push_channel_id": str(config.get("epic_push_channel_id", "")),
+        "epic_push_times": [str(x) for x in config.get("epic_push_times", ["12:00"])],
+        "has_web_password": bool(str(config.get("web_password", "")).strip()),
+        "has_edit_password": bool(str(config.get("edit_password", "")).strip()),
+    }
+
+
+def save_config(config):
+    """原子写回 config.json，避免中途崩溃留下半截配置。"""
+    tmp = CONFIG_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(config, ensure_ascii=False, indent=4), encoding="utf-8")
+    tmp.replace(CONFIG_FILE)
+
+
+def apply_config(monitor, bot, edit_guard, changes):
+    """校验并保存配置，能热生效的立即生效。返回 (已应用字段, 需重启字段)。"""
+    for key in changes:
+        if key == "web_password":
+            raise ValueError("出于安全考虑，不支持通过接口修改 web_password")
+    coerced = {key: coerce_config_value(key, value) for key, value in changes.items()}
+
+    with monitor.lock:
+        config = monitor.config
+        config.update(coerced)
+        save_config(config)
+
+    applied = sorted(coerced)
+    restart_needed = sorted(set(applied) & RESTART_REQUIRED_FIELDS)
+    live = set(applied) - set(restart_needed)
+
+    if "poll_interval" in live:
+        monitor.interval = coerced["poll_interval"]
+    if "channel_ids" in live:
+        monitor.channel_ids = coerced["channel_ids"]
+    if "edit_password" in live:
+        edit_guard.set_password(coerced["edit_password"])
+        monitor.edit_enabled = edit_guard.enabled
+    if bot is not None:
+        if "epic_push_times" in live:
+            bot.epic_push_times = parse_push_times(coerced["epic_push_times"])
+        if "epic_push_channel_id" in live:
+            bot.epic_push_channel_id = coerced["epic_push_channel_id"]
+        if "bot_enabled" in live:
+            bot.enabled = coerced["bot_enabled"]
+    return applied, restart_needed
+
+
 class WebHandler(BaseHTTPRequestHandler):
     monitor = None
     auth = None
     edit_guard = None
+    bot = None
+    room_cache = None
 
     def log_message(self, fmt, *args):
         return
@@ -963,10 +1324,14 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def session_token(self):
+        """会话令牌可来自 Cookie（网页面板）或 X-Session-Token 头（App）。"""
+        return self.headers.get("X-Session-Token") or self.get_cookie(SESSION_COOKIE_NAME)
+
     def authenticated(self):
         if self.auth is None:
             return True
-        return self.auth.verify(self.get_cookie(SESSION_COOKIE_NAME))
+        return self.auth.verify(self.session_token())
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -977,17 +1342,15 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_text(LOGIN_HTML.replace("__ERROR__", ""))
             return
         if parsed.path == "/logout":
-            token = self.get_cookie(SESSION_COOKIE_NAME)
+            token = self.session_token()
             if self.auth is not None:
                 self.auth.logout(token)
             self.redirect("/login", clear_cookie=True)
             return
+        is_api = parsed.path.startswith("/api/")
         if not self.authenticated():
-            if parsed.path == "/api/data":
-                self.send_text(
-                    json.dumps({"error": "未登录"}, ensure_ascii=False),
-                    "application/json; charset=utf-8", 401,
-                )
+            if is_api:
+                self.send_json({"error": "未登录"}, 401)
             else:
                 self.redirect("/login")
             return
@@ -1000,11 +1363,41 @@ class WebHandler(BaseHTTPRequestHandler):
                 self.send_text(json.dumps(data, ensure_ascii=False), "application/json; charset=utf-8")
             except Exception as exc:
                 self.send_text(json.dumps({"error": str(exc)}, ensure_ascii=False), "application/json; charset=utf-8", 500)
+        elif parsed.path == "/api/session":
+            self.handle_session()
+        elif parsed.path == "/api/status":
+            try:
+                self.send_json(build_status(self.monitor, self.bot))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 500)
+        elif parsed.path == "/api/room":
+            self.handle_room()
+        elif parsed.path == "/api/roles":
+            self.handle_roles(parsed.query)
+        elif parsed.path == "/api/history":
+            self.handle_history(parsed.query)
+        elif parsed.path == "/api/config":
+            self.handle_config_read()
         else:
             self.send_text("404 Not Found", "text/plain; charset=utf-8", 404)
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/login":
+            self.handle_api_login()
+            return
+        if parsed.path == "/api/logout":
+            self.handle_api_logout()
+            return
+        if parsed.path == "/api/send":
+            self.handle_send()
+            return
+        if parsed.path == "/api/role":
+            self.handle_role_write()
+            return
+        if parsed.path == "/api/config":
+            self.handle_config_write()
+            return
         if parsed.path == "/api/edit":
             self.handle_edit()
             return
@@ -1032,6 +1425,20 @@ class WebHandler(BaseHTTPRequestHandler):
     def send_json(self, obj, status=200):
         self.send_text(json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8", status)
 
+    def read_json_payload(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_JSON_BODY_BYTES:
+                # 不能只读一部分：残留 body 会被 keep-alive 当作下一个请求
+                self.close_connection = True
+                return None
+            # 上限需容纳 2000 字中文消息（UTF-8 每字最多 3 字节）与较长的配置列表
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            payload = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def guarded_payload(self):
         """编辑/删除接口的公共前置校验：会话 + 独立二级密码。
 
@@ -1040,10 +1447,8 @@ class WebHandler(BaseHTTPRequestHandler):
         if not self.authenticated():
             self.send_json({"error": "未登录"}, 401)
             return None
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(min(length, 8192)).decode("utf-8", errors="replace"))
-        except (ValueError, TypeError):
+        payload = self.read_json_payload()
+        if payload is None:
             self.send_json({"error": "无效请求"}, 400)
             return None
         ok, message = self.edit_guard.verify(str(payload.get("password", "")))
@@ -1080,6 +1485,192 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         self.send_json({"ok": True})
 
+    # ------------------------------------------------------- App 专用 JSON 接口
+
+    def handle_api_login(self):
+        """App 登录：JSON 换取会话令牌，不依赖 Cookie。"""
+        payload = self.read_json_payload()
+        if payload is None:
+            self.send_json({"error": "无效请求"}, 400)
+            return
+        password = str(payload.get("password", ""))
+        if self.auth is None:
+            self.send_json({"error": "服务器未启用访问密码"}, 500)
+            return
+        ok, result = self.auth.attempt(password)
+        if not ok:
+            self.send_json({"error": result}, 401)
+            return
+        self.send_json({"ok": True, "token": result, "ttl_seconds": SESSION_TTL_SECONDS})
+
+    def handle_api_logout(self):
+        if self.auth is not None:
+            self.auth.logout(self.session_token())
+        self.send_json({"ok": True})
+
+    def handle_session(self):
+        """App 启动时复用已保存的令牌：有效则直接返回运行状态。"""
+        self.send_json({"ok": True, "status": build_status(self.monitor, self.bot)})
+
+    def handle_room(self):
+        if self.room_cache is None:
+            self.send_json({"error": "房间信息不可用"}, 500)
+            return
+        data, error = self.room_cache.get()
+        if data is None:
+            self.send_json({"error": error or "获取房间信息失败"}, 502)
+            return
+        self.send_json({"ok": True, "room": data, "warning": error})
+
+    def handle_roles(self, query):
+        q = parse_qs(query)
+        user_id = q.get("user_id", [""])[0].strip()
+        if self.bot is None:
+            self.send_json({"error": "机器人未启动，无法访问身份组"}, 503)
+            return
+        try:
+            roles = self.bot.list_roles()
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 502)
+            return
+        result = {"ok": True, "roles": roles}
+        if user_id:
+            try:
+                result["user_roles"] = sorted(self.bot.roles_of(user_id))
+            except Exception as exc:
+                result["user_roles"] = []
+                result["warning"] = str(exc)
+        self.send_json(result)
+
+    def handle_history(self, query):
+        q = parse_qs(query)
+        user_filter = q.get("user", [""])[0].strip()
+        user_ids = None
+        if user_filter and not user_filter.isdigit():
+            user_ids = self.monitor.nicknames.search(user_filter) if self.monitor.nicknames else []
+            user_filter = ""
+        try:
+            data = query_history(
+                self.monitor.conn,
+                user_filter=user_filter,
+                channel_filter=q.get("channel", [""])[0].strip(),
+                date_filter=q.get("date", [""])[0].strip(),
+                limit=q.get("limit", ["100"])[0],
+                offset=q.get("offset", ["0"])[0],
+                include_archived=q.get("archived", ["1"])[0] != "0",
+                user_ids=user_ids,
+            )
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 500)
+            return
+        for item in data["items"]:
+            info = self.monitor.nicknames.lookup(item["user_id"]) if self.monitor.nicknames else {}
+            item["username"] = info.get("name", "")
+            item["avatar"] = info.get("avatar", "")
+        for entry in data["summary"]:
+            info = self.monitor.nicknames.lookup(entry["user_id"]) if self.monitor.nicknames else {}
+            entry["username"] = info.get("name", "")
+            entry["avatar"] = info.get("avatar", "")
+        data["ok"] = True
+        self.send_json(data)
+
+    def handle_send(self):
+        """向指定频道发送消息：msg_type 4=markdown，带 at_user_id 时用 10（支持 @）。"""
+        if not self.authenticated():
+            self.send_json({"error": "未登录"}, 401)
+            return
+        payload = self.read_json_payload()
+        if payload is None:
+            self.send_json({"error": "无效请求"}, 400)
+            return
+        if self.bot is None:
+            self.send_json({"error": "机器人未启动，无法发送消息"}, 503)
+            return
+        channel_id = str(payload.get("channel_id", "")).strip()
+        msg = str(payload.get("msg", "")).strip()
+        at_user_id = str(payload.get("at_user_id", "")).strip()
+        if not channel_id:
+            self.send_json({"error": "请选择要发送的频道"}, 400)
+            return
+        if not msg:
+            self.send_json({"error": "消息内容不能为空"}, 400)
+            return
+        if len(msg) > SEND_MSG_MAX_LENGTH:
+            self.send_json({"error": f"消息过长（最多 {SEND_MSG_MAX_LENGTH} 字）"}, 400)
+            return
+        try:
+            msg_type = int(payload.get("msg_type") or (MSG_TYPE_MD_AT if at_user_id else MSG_TYPE_MD))
+        except (ValueError, TypeError):
+            msg_type = MSG_TYPE_MD
+        channel_type = self.channel_type_of(channel_id)
+        try:
+            self.bot.send_channel_message(
+                self.bot.room_id, channel_id, msg, msg_type=msg_type,
+                at_user_id=at_user_id, channel_type=channel_type,
+            )
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 502)
+            return
+        self.send_json({"ok": True})
+
+    def channel_type_of(self, channel_id):
+        if self.room_cache is None:
+            return 1
+        data, _ = self.room_cache.get()
+        for channel in (data or {}).get("channels", []):
+            if str(channel.get("channel_id")) == str(channel_id):
+                value = to_int_or_none(channel.get("channel_type"))
+                return 1 if value is None else value
+        return 1
+
+    def handle_role_write(self):
+        """身份组变更：与记录编辑共用二级密码，避免仅凭会话即可改动房间权限。"""
+        payload = self.guarded_payload()
+        if payload is None:
+            return
+        action = str(payload.get("action", "")).strip().lower()
+        user_id = str(payload.get("user_id", "")).strip()
+        role_id = str(payload.get("role_id", "")).strip()
+        if action not in ("grant", "revoke") or not user_id.isdigit() or not role_id:
+            self.send_json({"error": "参数无效：需要 action=grant|revoke、user_id、role_id"}, 400)
+            return
+        if self.bot is None:
+            self.send_json({"error": "机器人未启动，无法修改身份组"}, 503)
+            return
+        try:
+            if action == "grant":
+                self.bot.grant_role(user_id, role_id)
+            else:
+                self.bot.revoke_role(user_id, role_id)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 502)
+            return
+        self.send_json({"ok": True, "action": action, "user_id": user_id, "role_id": role_id})
+
+    def handle_config_read(self):
+        self.send_json({"ok": True, "config": public_config(self.monitor.config)})
+
+    def handle_config_write(self):
+        payload = self.guarded_payload()
+        if payload is None:
+            return
+        changes = payload.get("config")
+        if not isinstance(changes, dict) or not changes:
+            self.send_json({"error": "没有需要保存的配置项"}, 400)
+            return
+        try:
+            applied, restart_needed = apply_config(self.monitor, self.bot, self.edit_guard, changes)
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, 400)
+            return
+        except Exception as exc:
+            self.send_json({"error": f"保存失败：{exc}"}, 500)
+            return
+        self.send_json({
+            "ok": True, "applied": applied, "restart_needed": restart_needed,
+            "config": public_config(self.monitor.config),
+        })
+
     def redirect(self, location, set_cookie="", clear_cookie=False):
         self.send_response(303)
         self.send_header("Location", location)
@@ -1091,10 +1682,12 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def start_web(monitor, port, auth, edit_guard):
+def start_web(monitor, port, auth, edit_guard, bot=None, room_cache=None):
     WebHandler.monitor = monitor
     WebHandler.auth = auth
     WebHandler.edit_guard = edit_guard
+    WebHandler.bot = bot
+    WebHandler.room_cache = room_cache
     try:
         server = ThreadingHTTPServer((WEB_HOST, port), WebHandler)
     except OSError as exc:
@@ -1113,14 +1706,21 @@ def main():
     monitor = Monitor(config, conn, nicknames)
     auth = AuthManager(config)
     edit_guard = EditGuard(config)
+    monitor.edit_enabled = edit_guard.enabled
     web_port = int(config.get("web_port", WEB_PORT))
     monitor.web_port = web_port
-    threading.Thread(target=start_web, args=(monitor, web_port, auth, edit_guard), daemon=True).start()
+    room_cache = RoomCache(config)
     # 斜杠命令机器人（/fortune /pick /forcepushepic /init /help），失败不影响监控本身
+    bot = None
     try:
-        ChatBot(config, nicknames=nicknames).start_background()
+        bot = ChatBot(config, nicknames=nicknames)
+        bot.start_background()
     except Exception as exc:
+        bot = None
         print(f"机器人命令功能启动失败（监控不受影响）：{exc}")
+    threading.Thread(
+        target=start_web, args=(monitor, web_port, auth, edit_guard, bot, room_cache), daemon=True
+    ).start()
     try:
         monitor.run()
     except KeyboardInterrupt:
